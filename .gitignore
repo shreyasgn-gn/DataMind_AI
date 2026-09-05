@@ -1,0 +1,54 @@
+# Python
+.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+
+# Environment variables
+.env
+.env.*
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+
+# Build files
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Project temporary files
+*.log
+temp/
+tmp/
+
+# Generated outputs
+outputs/*
+!outputs/.gitkeep
+
+# Uploaded datasets
+data/uploads/*
+!data/uploads/.gitkeep
+
+# Large ML files
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.pth
+
+# Secrets
+*.key
+*.pem
