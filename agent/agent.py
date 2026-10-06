@@ -1,9 +1,9 @@
 from pathlib import Path
-
-import pandas as pd
+from typing import Any, Callable
 
 from agent.state import AgentState
 from agent.task_understanding import understand_task
+from agent.recovery import execute_with_recovery
 
 from tools.data_tools import (
     inspect_dataset,
@@ -47,20 +47,12 @@ class DataMindAgent:
     """
     Deterministic orchestration engine for DataMind AI.
 
-    Coordinates:
-    - dataset loading
-    - task understanding
-    - inspection
-    - profiling
-    - data-quality analysis
-    - cleaning
-    - EDA
-    - target-leakage detection
-    - feature engineering
-    - model training
-    - model evaluation
-    - feature importance
-    - SHAP explainability
+    Coordinates dataset understanding, data quality,
+    EDA, leakage detection, feature engineering, model
+    training, evaluation, and explainability.
+
+    Failed model-training operations can be retried
+    through the recovery engine.
     """
 
     def __init__(self):
@@ -84,7 +76,7 @@ class DataMindAgent:
         error: Exception,
     ) -> None:
         """
-        Store an error in the agent state.
+        Record an unrecovered execution error.
         """
 
         self.state.errors.append(
@@ -92,6 +84,63 @@ class DataMindAgent:
         )
 
         self.state.status = "failed"
+
+    def _run_with_recovery(
+        self,
+        operation_name: str,
+        operation: Callable[[], Any],
+        max_retries: int = 1,
+    ) -> Any:
+        """
+        Execute an operation through the recovery engine.
+
+        A failed operation is retried according to the
+        recovery policy. Failed attempts and recovery
+        actions are recorded in the shared agent state.
+        """
+
+        result = execute_with_recovery(
+            operation,
+            max_retries=max_retries,
+        )
+
+        # Keep a history when a retry was needed
+        # or the operation ultimately failed.
+        if (
+            result["attempts"] > 1
+            or not result["success"]
+        ):
+            self.state.recovery_history.append({
+                "operation": operation_name,
+                "success": result["success"],
+                "attempts": result["attempts"],
+                "errors": result["errors"],
+                "recovery_actions": (
+                    result["recovery_actions"]
+                ),
+            })
+
+        if not result["success"]:
+
+            errors = result.get(
+                "errors",
+                [],
+            )
+
+            if errors:
+                last_error = errors[-1]["error"]
+            else:
+                last_error = (
+                    "Unknown execution failure."
+                )
+
+            raise RuntimeError(
+                f"{operation_name} failed after "
+                f"{result['attempts']} attempt(s). "
+                f"Last error: {last_error}"
+            )
+
+        return result["result"]
 
     def load_data(self) -> None:
         """
@@ -168,7 +217,7 @@ class DataMindAgent:
         """
         Analyze dataset quality.
 
-        Clean the dataset only when quality issues
+        Clean the working dataset when quality issues
         are detected.
         """
 
@@ -182,9 +231,10 @@ class DataMindAgent:
             "data_quality"
         )
 
-        if self.state.data_quality[
-            "has_quality_issues"
-        ]:
+        if self.state.data_quality.get(
+            "has_quality_issues",
+            False,
+        ):
 
             (
                 self.state.dataset,
@@ -212,22 +262,17 @@ class DataMindAgent:
 
     def run_ml_workflow(self) -> None:
         """
-        Run the complete supervised ML workflow.
+        Execute the complete supervised ML workflow.
 
-        Pipeline:
-        leakage detection
-        ↓
-        leakage removal
-        ↓
-        feature engineering
-        ↓
-        model training
-        ↓
-        evaluation
-        ↓
-        feature importance
-        ↓
-        SHAP
+        Steps:
+        1. Detect target leakage.
+        2. Remove confirmed leakage features.
+        3. Exclude suspicious target-derived features.
+        4. Engineer features.
+        5. Train models with retry support.
+        6. Evaluate the selected model.
+        7. Generate feature importance and predictions.
+        8. Explain model behavior with SHAP.
         """
 
         if self.state.problem_type not in {
@@ -241,15 +286,15 @@ class DataMindAgent:
                 "A target column is required for ML."
             )
 
-        # -------------------------------------------------
-        # TARGET LEAKAGE DETECTION
-        # -------------------------------------------------
+        target = self.state.target_column
 
-        leakage_report = (
-            detect_target_leakage(
-                self.state.dataset,
-                self.state.target_column,
-            )
+        # ---------------------------------------------
+        # 1. TARGET LEAKAGE DETECTION
+        # ---------------------------------------------
+
+        leakage_report = detect_target_leakage(
+            self.state.dataset,
+            target,
         )
 
         self.state.leakage_report = (
@@ -260,9 +305,9 @@ class DataMindAgent:
             "target_leakage_detection"
         )
 
-        # -------------------------------------------------
-        # REMOVE CONFIRMED LEAKAGE
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # 2. REMOVE CONFIRMED LEAKAGE FEATURES
+        # ---------------------------------------------
 
         (
             ml_source_data,
@@ -276,9 +321,9 @@ class DataMindAgent:
             "removed_columns"
         ] = removed_columns
 
-        # -------------------------------------------------
-        # FEATURE ENGINEERING
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # 3. FEATURE ENGINEERING
+        # ---------------------------------------------
 
         (
             ml_data,
@@ -287,20 +332,14 @@ class DataMindAgent:
             ml_source_data
         )
 
-        if self.state.target_column not in (
-            ml_data.columns
-        ):
+        if target not in ml_data.columns:
             raise ValueError(
-                f"Target column "
-                f"'{self.state.target_column}' "
-                "was not available after "
-                "feature preparation."
+                f"Target column '{target}' was not "
+                "available after feature preparation."
             )
 
-        # -------------------------------------------------
-        # REMOVE SUSPICIOUS DERIVED FEATURES
-        # -------------------------------------------------
-
+        # Exclude columns whose names suggest that
+        # they are derived from the target.
         suspicious_columns = (
             leakage_report.get(
                 "suspicious_leakage_columns",
@@ -313,13 +352,11 @@ class DataMindAgent:
             for column in suspicious_columns
             if (
                 column in ml_data.columns
-                and column
-                != self.state.target_column
+                and column != target
             )
         ]
 
         if suspicious_columns:
-
             ml_data = ml_data.drop(
                 columns=suspicious_columns
             )
@@ -328,19 +365,29 @@ class DataMindAgent:
             "excluded_suspicious_columns"
         ] = suspicious_columns
 
+        if ml_data.empty:
+            raise ValueError(
+                "No usable columns remain after "
+                "leakage removal and feature engineering."
+            )
+
         self._record_step(
             "feature_engineering"
         )
 
-        # -------------------------------------------------
-        # MODEL TRAINING
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # 4. MODEL TRAINING WITH RECOVERY
+        # ---------------------------------------------
 
         self.state.training_result = (
-            train_models(
-                ml_data,
-                self.state.target_column,
-                self.state.problem_type,
+            self._run_with_recovery(
+                operation_name="model_training",
+                operation=lambda: train_models(
+                    ml_data,
+                    target,
+                    self.state.problem_type,
+                ),
+                max_retries=1,
             )
         )
 
@@ -362,20 +409,19 @@ class DataMindAgent:
 
         if best_model is None:
             raise ValueError(
-                "No valid model was "
-                "successfully trained."
+                "No valid model was successfully trained."
             )
 
-        # -------------------------------------------------
-        # PREPARE EVALUATION DATA
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # 5. PREPARE EVALUATION DATA
+        # ---------------------------------------------
 
         (
             X,
             y,
         ) = prepare_training_data(
             ml_data,
-            self.state.target_column,
+            target,
         )
 
         is_classification = (
@@ -394,9 +440,9 @@ class DataMindAgent:
             classification=is_classification,
         )
 
-        # -------------------------------------------------
-        # MODEL EVALUATION
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # 6. MODEL EVALUATION
+        # ---------------------------------------------
 
         if is_classification:
 
@@ -422,9 +468,9 @@ class DataMindAgent:
             "model_evaluation"
         )
 
-        # -------------------------------------------------
-        # STANDARD FEATURE IMPORTANCE
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # 7. FEATURE IMPORTANCE
+        # ---------------------------------------------
 
         importance = get_feature_importance(
             best_model,
@@ -440,9 +486,9 @@ class DataMindAgent:
             "feature_importance"
         )
 
-        # -------------------------------------------------
-        # PREDICTIONS
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # 8. PREDICTIONS
+        # ---------------------------------------------
 
         predictions = generate_predictions(
             best_model,
@@ -460,9 +506,9 @@ class DataMindAgent:
             )
         )
 
-        # -------------------------------------------------
-        # SHAP EXPLAINABILITY
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # 9. SHAP EXPLAINABILITY
+        # ---------------------------------------------
 
         shap_result = explain_model(
             best_model,
@@ -477,9 +523,9 @@ class DataMindAgent:
             "shap_explainability"
         )
 
-        # -------------------------------------------------
-        # FINAL EVALUATION SUMMARY
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # 10. EVALUATION SUMMARY
+        # ---------------------------------------------
 
         self.state.explainability_result[
             "summary"
@@ -491,10 +537,7 @@ class DataMindAgent:
 
     def generate_final_answer(self) -> str:
         """
-        Generate a concise deterministic result.
-
-        Ollama will later replace this with richer
-        natural-language reasoning.
+        Generate a concise user-facing summary.
         """
 
         if (
@@ -513,10 +556,8 @@ class DataMindAgent:
             )
 
             self.state.final_answer = (
-                "Dataset analysis completed "
-                "successfully. "
-                f"The dataset contains "
-                f"{rows} rows and "
+                "Dataset analysis completed successfully. "
+                f"The dataset contains {rows} rows and "
                 f"{columns} columns."
             )
 
@@ -532,22 +573,34 @@ class DataMindAgent:
                 )
             )
 
-            self.state.final_answer = (
+            retry_count = sum(
+                max(
+                    entry.get("attempts", 1) - 1,
+                    0,
+                )
+                for entry in self.state.recovery_history
+            )
+
+            answer = (
                 f"{self.state.problem_type.title()} "
                 "workflow completed successfully. "
                 f"Best model: {model_name}."
             )
 
-        elif (
-            self.state.task_type
-            == "clustering"
-        ):
+            if retry_count:
+                answer += (
+                    f" Recovery succeeded after "
+                    f"{retry_count} retry attempt(s)."
+                )
+
+            self.state.final_answer = answer
+
+        elif self.state.task_type == "clustering":
 
             self.state.final_answer = (
-                "Clustering was identified "
-                "as the requested task, but "
-                "the clustering engine has "
-                "not been implemented yet."
+                "Clustering was identified as the requested "
+                "task, but the clustering engine has not "
+                "been implemented yet."
             )
 
         elif (
@@ -556,10 +609,9 @@ class DataMindAgent:
         ):
 
             self.state.final_answer = (
-                "Anomaly detection was identified "
-                "as the requested task, but the "
-                "anomaly detection engine has not "
-                "been implemented yet."
+                "Anomaly detection was identified as the "
+                "requested task, but the anomaly detection "
+                "engine has not been implemented yet."
             )
 
         else:
@@ -587,13 +639,9 @@ class DataMindAgent:
 
         try:
 
-            if not Path(
-                file_path
-            ).exists():
-
+            if not Path(file_path).exists():
                 raise FileNotFoundError(
-                    f"Dataset not found: "
-                    f"{file_path}"
+                    f"Dataset not found: {file_path}"
                 )
 
             self.load_data()

@@ -61,6 +61,10 @@ class AgentState:
         default_factory=dict
     )
 
+    recovery_history: list[dict] = field(
+        default_factory=list
+    )
+
     errors: list[str] = field(
         default_factory=list
     )
