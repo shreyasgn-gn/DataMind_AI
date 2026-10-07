@@ -33,15 +33,15 @@ class AgentState:
         default_factory=dict
     )
 
-    leakage_report: dict = field(
-        default_factory=dict
-    )
-
     cleaning_report: dict = field(
         default_factory=dict
     )
 
     eda: dict = field(
+        default_factory=dict
+    )
+
+    leakage_report: dict = field(
         default_factory=dict
     )
 
@@ -58,6 +58,10 @@ class AgentState:
     )
 
     explainability_result: dict = field(
+        default_factory=dict
+    )
+
+    unsupervised_result: dict = field(
         default_factory=dict
     )
 

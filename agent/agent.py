@@ -67,6 +67,11 @@ from tools.shap_tools import (
     explain_model,
 )
 
+from tools.unsupervised_tools import (
+    run_clustering,
+    run_anomaly_detection,
+)
+
 
 class DataMindAgent:
     """
@@ -901,6 +906,51 @@ class DataMindAgent:
             importance,
         )
 
+    def run_unsupervised_workflow(
+        self,
+    ) -> None:
+        """
+        Execute clustering or anomaly detection.
+
+        These are target-free workflows and therefore do not
+        use the supervised training/evaluation pipeline.
+        """
+
+        if self.state.problem_type == "clustering":
+
+            result = run_clustering(
+                self.state.dataset
+            )
+
+            self.state.unsupervised_result = {
+                "task": "clustering",
+                **result,
+            }
+
+            self._record_step(
+                "clustering"
+            )
+
+            return
+
+        if self.state.problem_type == "anomaly_detection":
+
+            result = run_anomaly_detection(
+                self.state.dataset
+            )
+
+            self.state.unsupervised_result = {
+                "task": "anomaly_detection",
+                **result,
+            }
+
+            self._record_step(
+                "anomaly_detection"
+            )
+
+            return
+
+
     def generate_deterministic_answer(
         self,
     ) -> str:
@@ -948,25 +998,67 @@ class DataMindAgent:
             )
 
         if (
-            self.state.task_type
+            self.state.problem_type
             == "clustering"
         ):
 
-            return (
-                "Clustering was identified as the requested "
-                "task, but the clustering engine has not "
-                "been implemented yet."
+            result = self.state.unsupervised_result
+
+            cluster_count = result.get(
+                "cluster_count",
+                "Unknown",
             )
 
+            silhouette = result.get(
+                "silhouette_score",
+                "Unknown",
+            )
+
+            quality = result.get(
+                "cluster_quality",
+                "Unknown",
+            )
+
+            warning = result.get(
+                "warning"
+            )
+
+            answer = (
+                f"Clustering completed using "
+                f"{result.get('method', 'KMeans')}. "
+                f"DataMind identified {cluster_count} "
+                f"clusters with a silhouette score of "
+                f"{silhouette}. Cluster quality: {quality}."
+            )
+
+            if warning:
+                answer += f" {warning}"
+
+            return answer
+
         if (
-            self.state.task_type
+            self.state.problem_type
             == "anomaly_detection"
         ):
 
+            result = self.state.unsupervised_result
+
+            anomaly_count = result.get(
+                "anomaly_count",
+                0,
+            )
+
+            anomaly_rate = result.get(
+                "anomaly_rate",
+                0,
+            )
+
             return (
-                "Anomaly detection was identified as the "
-                "requested task, but the anomaly detection "
-                "engine has not been implemented yet."
+                f"Anomaly detection completed using "
+                f"{result.get('method', 'Isolation Forest')}. "
+                f"DataMind identified {anomaly_count} "
+                f"potential anomalies, representing "
+                f"{float(anomaly_rate) * 100:.2f}% of analyzed rows."
             )
 
         return (
@@ -1118,6 +1210,13 @@ class DataMindAgent:
             }:
 
                 self.run_ml_workflow()
+
+            elif self.state.problem_type in {
+                "clustering",
+                "anomaly_detection",
+            }:
+
+                self.run_unsupervised_workflow()
 
             self.generate_final_answer()
 

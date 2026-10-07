@@ -184,6 +184,127 @@ def build_upload_response(
     }
 
 
+def build_unsupervised_response(
+    result: dict,
+) -> dict:
+    """
+    Build a compact frontend-safe response for
+    clustering or anomaly detection.
+
+    Large per-row arrays are intentionally excluded.
+    """
+
+    if not result:
+        return {}
+
+    task = result.get(
+        "task"
+    )
+
+    # --------------------------------------------------------
+    # Clustering
+    # --------------------------------------------------------
+
+    if task == "clustering":
+
+        return {
+            "task": "clustering",
+            "success": result.get(
+                "success",
+                False,
+            ),
+            "method": result.get(
+                "method",
+                "KMeans",
+            ),
+            "rows_analyzed": result.get(
+                "rows_analyzed",
+                0,
+            ),
+            "features_used": result.get(
+                "features_used",
+                0,
+            ),
+            "cluster_count": result.get(
+                "cluster_count",
+                0,
+            ),
+            "silhouette_score": result.get(
+                "silhouette_score"
+            ),
+            "cluster_quality": result.get(
+                "cluster_quality"
+            ),
+            "cluster_balance_guard": result.get(
+                "cluster_balance_guard"
+            ),
+            "cluster_sizes": result.get(
+                "cluster_sizes",
+                {},
+            ),
+            "cluster_scores": result.get(
+                "cluster_scores",
+                {},
+            ),
+            "warning": result.get(
+                "warning"
+            ),
+        }
+
+    # --------------------------------------------------------
+    # Anomaly detection
+    # --------------------------------------------------------
+
+    if task == "anomaly_detection":
+
+        return {
+            "task": "anomaly_detection",
+            "success": result.get(
+                "success",
+                False,
+            ),
+            "method": result.get(
+                "method",
+                "Isolation Forest",
+            ),
+            "rows_analyzed": result.get(
+                "rows_analyzed",
+                0,
+            ),
+            "features_used": result.get(
+                "features_used",
+                0,
+            ),
+            "contamination_strategy": result.get(
+                "contamination_strategy"
+            ),
+            "effective_contamination": result.get(
+                "effective_contamination"
+            ),
+            "anomaly_count": result.get(
+                "anomaly_count",
+                0,
+            ),
+            "anomaly_rate": result.get(
+                "anomaly_rate",
+                0,
+            ),
+            "normal_count": result.get(
+                "normal_count",
+                0,
+            ),
+            "top_anomalies": result.get(
+                "top_anomalies",
+                [],
+            )[:10],
+            "warning": result.get(
+                "warning"
+            ),
+        }
+
+    return {}
+
+
 def build_analysis_response(
     original_file_name: str,
     file_path: Path,
@@ -192,8 +313,8 @@ def build_analysis_response(
     """
     Build a compact API response from DataMindAgent state.
 
-    Internal model objects, raw DataFrames, and large diagnostic
-    structures are intentionally excluded.
+    Raw datasets, raw DataFrames, large diagnostic structures,
+    and complete per-row clustering labels are excluded.
     """
 
     response = {
@@ -202,24 +323,41 @@ def build_analysis_response(
             if state.status == "completed"
             else "DataMind analysis failed."
         ),
+
         "status": state.status,
+
         "file_name": original_file_name,
+
         "file_path": str(file_path),
+
         "question": state.question,
+
+        # ----------------------------------------------------
+        # Task
+        # ----------------------------------------------------
+
         "task": {
             "task_type": state.task_type,
             "problem_type": state.problem_type,
             "target_column": state.target_column,
+
             "source": state.task_understanding.get(
                 "source"
             ),
+
             "model": state.task_understanding.get(
                 "model"
             ),
+
             "llm_task_correction": state.task_understanding.get(
                 "llm_task_correction"
             ),
         },
+
+        # ----------------------------------------------------
+        # Dataset
+        # ----------------------------------------------------
+
         "dataset": {
             "rows": state.profile.get(
                 "rows",
@@ -230,41 +368,79 @@ def build_analysis_response(
                 0,
             ),
         },
+
+        # ----------------------------------------------------
+        # Data quality
+        # ----------------------------------------------------
+
         "data_quality": {
             "has_quality_issues": state.data_quality.get(
                 "has_quality_issues",
                 False,
             ),
+
             "missing_values": state.data_quality.get(
                 "total_missing_values",
                 0,
             ),
+
             "duplicate_rows": state.data_quality.get(
                 "duplicate_rows",
                 0,
             ),
         },
+
+        # ----------------------------------------------------
+        # Supervised ML
+        # ----------------------------------------------------
+
         "evaluation": state.evaluation_result,
+
         "model": {
             "best_model": state.training_result.get(
                 "best_model"
             ),
         },
+
+        # ----------------------------------------------------
+        # Leakage
+        # ----------------------------------------------------
+
         "leakage": {
             "detected": state.leakage_report.get(
                 "leakage_detected",
                 False,
             ),
+
             "removed_columns": state.leakage_report.get(
                 "removed_columns",
                 [],
             ),
+
             "excluded_columns": state.leakage_report.get(
                 "excluded_suspicious_columns",
                 [],
             ),
         },
+
+        # ----------------------------------------------------
+        # Unsupervised
+        # ----------------------------------------------------
+
+        "unsupervised": build_unsupervised_response(
+            state.unsupervised_result
+        ),
+
+        # ----------------------------------------------------
+        # Explainability
+        # ----------------------------------------------------
+
         "explainability": {},
+
+        # ----------------------------------------------------
+        # Recovery
+        # ----------------------------------------------------
+
         "recovery": {
             "retries": sum(
                 max(
@@ -277,17 +453,25 @@ def build_analysis_response(
                 for item in state.recovery_history
             ),
         },
+
+        # ----------------------------------------------------
+        # Workflow
+        # ----------------------------------------------------
+
         "completed_steps": state.completed_steps,
+
         "errors": state.errors,
+
         "final_answer": state.final_answer,
+
         "final_answer_source": (
             state.final_answer_source
         ),
     }
 
-    # ---------------------------------------------
+    # ========================================================
     # Feature importance
-    # ---------------------------------------------
+    # ========================================================
 
     importance = (
         state.explainability_result.get(
@@ -322,9 +506,9 @@ def build_analysis_response(
             "top_features"
         ] = []
 
-    # ---------------------------------------------
-    # SHAP summary
-    # ---------------------------------------------
+    # ========================================================
+    # SHAP
+    # ========================================================
 
     shap_result = (
         state.explainability_result.get(
@@ -371,6 +555,10 @@ def build_analysis_response(
     )
 
 
+# ============================================================
+# ROOT
+# ============================================================
+
 @app.get("/")
 def root():
     """
@@ -384,6 +572,10 @@ def root():
     }
 
 
+# ============================================================
+# HEALTH
+# ============================================================
+
 @app.get("/health")
 def health():
     """
@@ -395,6 +587,10 @@ def health():
         "service": "DataMind AI",
     }
 
+
+# ============================================================
+# UPLOAD
+# ============================================================
 
 @app.post("/upload")
 async def upload_dataset(
@@ -458,6 +654,10 @@ async def upload_dataset(
     )
 
 
+# ============================================================
+# ANALYZE
+# ============================================================
+
 @app.post("/analyze")
 async def analyze_dataset(
     question: str = Form(...),
@@ -466,7 +666,12 @@ async def analyze_dataset(
     """
     Run the complete DataMind autonomous workflow.
 
-    Returns a compact, frontend-friendly JSON response.
+    Supports:
+    - exploratory analysis
+    - classification
+    - regression
+    - clustering
+    - anomaly detection
     """
 
     if not question.strip():

@@ -5,9 +5,9 @@ const ANALYSIS_STAGES = [
   "Inspecting dataset",
   "Understanding your question",
   "Checking data quality",
-  "Detecting leakage",
+  "Choosing the analysis strategy",
   "Engineering features",
-  "Training and evaluating models",
+  "Running the analysis",
   "Generating explanations",
 ];
 
@@ -53,12 +53,36 @@ function FeatureBar({ feature, importance, maxImportance }) {
     <div className="feature-item">
       <div className="feature-meta">
         <span>{feature}</span>
-        <strong>{Number(importance).toFixed(4)}</strong>
+        <strong>{formatNumber(importance, 4)}</strong>
       </div>
+
       <div className="feature-track">
         <div
           className="feature-fill"
           style={{ width: `${Math.min(100, percentage)}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ClusterBar({ cluster, count, maxCount }) {
+  const width =
+    maxCount > 0
+      ? Math.max(4, (Number(count) / maxCount) * 100)
+      : 4;
+
+  return (
+    <div className="cluster-item">
+      <div className="cluster-meta">
+        <span>Cluster {cluster}</span>
+        <strong>{formatNumber(count, 0)} rows</strong>
+      </div>
+
+      <div className="cluster-track">
+        <div
+          className="cluster-fill"
+          style={{ width: `${Math.min(100, width)}%` }}
         />
       </div>
     </div>
@@ -113,12 +137,30 @@ function App() {
 
     const interval = setInterval(() => {
       setLoadingStage((current) =>
-        Math.min(current + 1, ANALYSIS_STAGES.length - 1)
+        Math.min(
+          current + 1,
+          ANALYSIS_STAGES.length - 1
+        )
       );
     }, 2200);
 
     return () => clearInterval(interval);
   }, [loading]);
+
+  const taskType =
+    result?.task?.task_type ||
+    result?.task?.problem_type ||
+    "";
+
+  const isSupervised =
+    taskType === "classification" ||
+    taskType === "regression";
+
+  const isClustering =
+    taskType === "clustering";
+
+  const isAnomalyDetection =
+    taskType === "anomaly_detection";
 
   const topFeatures = useMemo(
     () => result?.explainability?.top_features || [],
@@ -126,23 +168,54 @@ function App() {
   );
 
   const shapFeatures = useMemo(
-    () => result?.explainability?.shap_top_features || [],
+    () =>
+      result?.explainability?.shap_top_features || [],
+    [result]
+  );
+
+  const clusterSizes = useMemo(() => {
+    const sizes =
+      result?.unsupervised?.cluster_sizes || {};
+
+    return Object.entries(sizes).sort(
+      ([a], [b]) => Number(a) - Number(b)
+    );
+  }, [result]);
+
+  const topAnomalies = useMemo(
+    () =>
+      result?.unsupervised?.top_anomalies || [],
     [result]
   );
 
   const maxFeatureImportance = useMemo(() => {
     return Math.max(
-      ...topFeatures.map((item) => Number(item.importance) || 0),
+      ...topFeatures.map(
+        (item) =>
+          Number(item.importance) || 0
+      ),
       0
     );
   }, [topFeatures]);
 
   const maxShapImportance = useMemo(() => {
     return Math.max(
-      ...shapFeatures.map((item) => Number(item.importance) || 0),
+      ...shapFeatures.map(
+        (item) =>
+          Number(item.importance) || 0
+      ),
       0
     );
   }, [shapFeatures]);
+
+  const maxClusterCount = useMemo(() => {
+    return Math.max(
+      ...clusterSizes.map(
+        ([, count]) => Number(count) || 0
+      ),
+      0
+    );
+  }, [clusterSizes]);
 
   const analyzeDataset = async () => {
     if (!file) {
@@ -151,7 +224,9 @@ function App() {
     }
 
     if (!question.trim()) {
-      setError("Please enter a question for DataMind AI.");
+      setError(
+        "Please enter a question for DataMind AI."
+      );
       return;
     }
 
@@ -163,21 +238,35 @@ function App() {
 
     try {
       const formData = new FormData();
-      formData.append("file", file);
-      formData.append("question", question.trim());
 
-      const response = await fetch("/api/analyze", {
-        method: "POST",
-        body: formData,
-      });
+      formData.append(
+        "file",
+        file
+      );
 
-      const rawText = await response.text();
+      formData.append(
+        "question",
+        question.trim()
+      );
+
+      const response = await fetch(
+        "/api/analyze",
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
+
+      const rawText =
+        await response.text();
 
       let data = null;
 
       if (rawText.trim()) {
         try {
-          data = JSON.parse(rawText);
+          data = JSON.parse(
+            rawText
+          );
         } catch {
           throw new Error(
             `The server returned an invalid response (${response.status}).`
@@ -194,29 +283,49 @@ function App() {
       }
 
       if (!data) {
-        throw new Error("The server returned an empty response.");
+        throw new Error(
+          "The server returned an empty response."
+        );
+      }
+
+      if (data.status === "failed") {
+        throw new Error(
+          data.errors?.[0] ||
+            "DataMind could not complete the analysis."
+        );
       }
 
       setResult(data);
     } catch (err) {
-      setError(err.message || "Unable to complete the analysis.");
+      setError(
+        err.message ||
+          "Unable to complete the analysis."
+      );
     } finally {
       setLoading(false);
     }
   };
 
   const copyReport = async () => {
-    if (!result?.final_answer) return;
+    if (!result?.final_answer) {
+      return;
+    }
 
     try {
-      await navigator.clipboard.writeText(result.final_answer);
+      await navigator.clipboard.writeText(
+        result.final_answer
+      );
+
       setCopied(true);
 
-      setTimeout(() => {
-        setCopied(false);
-      }, 1800);
+      setTimeout(
+        () => setCopied(false),
+        1800
+      );
     } catch {
-      setError("Could not copy the report.");
+      setError(
+        "Could not copy the report."
+      );
     }
   };
 
@@ -232,46 +341,64 @@ function App() {
     <div className="app-shell">
       <header className="topbar">
         <div className="brand">
-          <div className="brand-mark">D</div>
+          <div className="brand-mark">
+            D
+          </div>
 
           <div>
             <h1>DataMind AI</h1>
-            <p>Autonomous AI Data Scientist</p>
+            <p>
+              Autonomous AI Data Scientist
+            </p>
           </div>
         </div>
 
         <div className="topbar-right">
           <div className="engine-chip">
-            <StatusDot online={backendOnline} />
+            <StatusDot
+              online={backendOnline}
+            />
+
             <span>
-              {backendOnline ? "AI Engine Online" : "AI Engine Offline"}
+              {backendOnline
+                ? "AI Engine Online"
+                : "AI Engine Offline"}
             </span>
           </div>
 
-          <div className="local-chip">LOCAL • OLLAMA</div>
+          <div className="local-chip">
+            LOCAL • OLLAMA
+          </div>
         </div>
       </header>
 
       <main className="main-content">
         <section className="hero">
-          <div className="eyebrow">AUTONOMOUS DATA SCIENCE</div>
+          <div className="eyebrow">
+            AUTONOMOUS DATA SCIENCE
+          </div>
 
           <h2>
             From raw data to
-            <span> intelligent decisions.</span>
+            <span>
+              intelligent decisions.
+            </span>
           </h2>
 
           <p>
-            Upload a dataset. Ask a question in plain English. DataMind AI
-            handles inspection, cleaning, task detection, modeling,
-            evaluation, leakage protection, and explainability.
+            Upload a dataset. Ask a question
+            in plain English. DataMind AI
+            chooses the right analysis,
+            executes the workflow, and
+            explains what it finds.
           </p>
 
           <div className="hero-stats">
             <span>CSV + XLSX</span>
-            <span>Local LLM</span>
+            <span>LOCAL LLM</span>
             <span>ML + SHAP</span>
-            <span>Leakage Aware</span>
+            <span>CLUSTERING</span>
+            <span>ANOMALY DETECTION</span>
           </div>
         </section>
 
@@ -279,13 +406,25 @@ function App() {
           <div className="control-card">
             <div className="card-heading">
               <div>
-                <div className="section-kicker">WORKSPACE</div>
-                <h3>Start an analysis</h3>
-                <p>Give DataMind a dataset and a goal.</p>
+                <div className="section-kicker">
+                  WORKSPACE
+                </div>
+
+                <h3>
+                  Start an analysis
+                </h3>
+
+                <p>
+                  Give DataMind a dataset
+                  and a goal.
+                </p>
               </div>
 
               {result && (
-                <button className="ghost-button" onClick={resetAnalysis}>
+                <button
+                  className="ghost-button"
+                  onClick={resetAnalysis}
+                >
                   New analysis
                 </button>
               )}
@@ -296,7 +435,11 @@ function App() {
                 type="file"
                 accept=".csv,.xlsx"
                 onChange={(event) => {
-                  setFile(event.target.files?.[0] || null);
+                  setFile(
+                    event.target.files?.[0] ||
+                      null
+                  );
+
                   setError("");
                 }}
               />
@@ -307,29 +450,48 @@ function App() {
 
               {file ? (
                 <>
-                  <strong>{file.name}</strong>
-                  <span>Dataset ready for analysis</span>
+                  <strong>
+                    {file.name}
+                  </strong>
+
+                  <span>
+                    Dataset ready for analysis
+                  </span>
                 </>
               ) : (
                 <>
-                  <strong>Upload your dataset</strong>
-                  <span>CSV or XLSX • click to browse</span>
+                  <strong>
+                    Upload your dataset
+                  </strong>
+
+                  <span>
+                    CSV or XLSX • click to browse
+                  </span>
                 </>
               )}
             </label>
 
             <div className="field-label-row">
-              <label className="field-label" htmlFor="question">
+              <label
+                className="field-label"
+                htmlFor="question"
+              >
                 Ask DataMind AI
               </label>
 
-              <span className="field-hint">Natural language</span>
+              <span className="field-hint">
+                Natural language
+              </span>
             </div>
 
             <textarea
               id="question"
               value={question}
-              onChange={(event) => setQuestion(event.target.value)}
+              onChange={(event) =>
+                setQuestion(
+                  event.target.value
+                )
+              }
               placeholder="Example: predicted profit"
               rows="4"
             />
@@ -337,7 +499,11 @@ function App() {
             <div className="prompt-list">
               <button
                 type="button"
-                onClick={() => setQuestion("predicted profit")}
+                onClick={() =>
+                  setQuestion(
+                    "predicted profit"
+                  )
+                }
               >
                 Predict a target
               </button>
@@ -345,7 +511,9 @@ function App() {
               <button
                 type="button"
                 onClick={() =>
-                  setQuestion("find important factors affecting the target")
+                  setQuestion(
+                    "find important factors affecting the target"
+                  )
                 }
               >
                 Find important factors
@@ -354,28 +522,58 @@ function App() {
               <button
                 type="button"
                 onClick={() =>
-                  setQuestion("analyze the dataset and summarize key findings")
+                  setQuestion(
+                    "group customers into similar segments"
+                  )
                 }
               >
-                Explore the data
+                Find similar groups
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setQuestion(
+                    "find unusual or anomalous records"
+                  )
+                }
+              >
+                Find anomalies
               </button>
             </div>
 
-            {error && <div className="error-box">{error}</div>}
+            {error && (
+              <div className="error-box">
+                {error}
+              </div>
+            )}
 
             <button
               className="analyze-button"
               onClick={analyzeDataset}
               disabled={loading}
             >
-              <span>{loading ? "Analyzing dataset" : "Run Analysis"}</span>
-              <span>{loading ? "…" : "→"}</span>
+              <span>
+                {loading
+                  ? "Analyzing dataset"
+                  : "Run Analysis"}
+              </span>
+
+              <span>
+                {loading
+                  ? "…"
+                  : "→"}
+              </span>
             </button>
 
             <div className="privacy-note">
               <span>◉</span>
-              Your uploaded dataset is processed by your local DataMind
-              environment.
+
+              <span>
+                Your dataset is processed
+                inside your local DataMind
+                environment.
+              </span>
             </div>
           </div>
 
@@ -383,23 +581,33 @@ function App() {
             {!result && !loading && (
               <div className="empty-state">
                 <div className="empty-orbit">
-                  <div className="empty-core">✦</div>
+                  <div className="empty-core">
+                    ✦
+                  </div>
                 </div>
 
-                <div className="section-kicker">ANALYSIS CONSOLE</div>
+                <div className="section-kicker">
+                  ANALYSIS CONSOLE
+                </div>
 
-                <h3>Insights will appear here</h3>
+                <h3>
+                  Insights will appear here
+                </h3>
 
                 <p>
-                  Once an analysis completes, you’ll see model performance,
-                  important features, SHAP explanations, data quality, and
-                  leakage protection results.
+                  DataMind automatically
+                  chooses between exploration,
+                  prediction, clustering, and
+                  anomaly detection based on
+                  your request.
                 </p>
 
                 <div className="empty-pipeline">
                   <span>Inspect</span>
                   <i />
-                  <span>Model</span>
+                  <span>Decide</span>
+                  <i />
+                  <span>Analyze</span>
                   <i />
                   <span>Explain</span>
                 </div>
@@ -412,33 +620,60 @@ function App() {
                   <span />
                 </div>
 
-                <div className="section-kicker">AI ANALYSIS RUNNING</div>
+                <div className="section-kicker">
+                  AI ANALYSIS RUNNING
+                </div>
 
-                <h3>{ANALYSIS_STAGES[loadingStage]}</h3>
+                <h3>
+                  {ANALYSIS_STAGES[
+                    loadingStage
+                  ]}
+                </h3>
 
                 <p>
-                  DataMind is executing the autonomous data-science pipeline.
+                  DataMind is executing the
+                  autonomous data-science
+                  pipeline.
                 </p>
 
                 <div className="stage-list">
-                  {ANALYSIS_STAGES.map((stage, index) => (
-                    <div
-                      className={`stage-row ${
-                        index < loadingStage
-                          ? "complete"
-                          : index === loadingStage
-                            ? "active"
-                            : ""
-                      }`}
-                      key={stage}
-                    >
-                      <span className="stage-indicator">
-                        {index < loadingStage ? "✓" : index + 1}
-                      </span>
-                      <span>{stage}</span>
-                      {index === loadingStage && <b>Running</b>}
-                    </div>
-                  ))}
+                  {ANALYSIS_STAGES.map(
+                    (
+                      stage,
+                      index
+                    ) => (
+                      <div
+                        className={`stage-row ${
+                          index <
+                          loadingStage
+                            ? "complete"
+                            : index ===
+                                loadingStage
+                              ? "active"
+                              : ""
+                        }`}
+                        key={stage}
+                      >
+                        <span className="stage-indicator">
+                          {index <
+                          loadingStage
+                            ? "✓"
+                            : index + 1}
+                        </span>
+
+                        <span>
+                          {stage}
+                        </span>
+
+                        {index ===
+                          loadingStage && (
+                          <b>
+                            Running
+                          </b>
+                        )}
+                      </div>
+                    )
+                  )}
                 </div>
               </div>
             )}
@@ -447,251 +682,653 @@ function App() {
               <div className="result-content">
                 <div className="result-top">
                   <div>
-                    <div className="result-kicker">ANALYSIS COMPLETE</div>
-                    <h3>{result.file_name}</h3>
+                    <div className="result-kicker">
+                      ANALYSIS COMPLETE
+                    </div>
+
+                    <h3>
+                      {result.file_name}
+                    </h3>
 
                     <div className="result-meta">
                       <span>
-                        {formatNumber(result.dataset?.rows, 0)} rows
+                        {formatNumber(
+                          result.dataset
+                            ?.rows,
+                          0
+                        )}{" "}
+                        rows
                       </span>
+
                       <span>•</span>
+
                       <span>
-                        {formatNumber(result.dataset?.columns, 0)} columns
+                        {formatNumber(
+                          result.dataset
+                            ?.columns,
+                          0
+                        )}{" "}
+                        columns
                       </span>
+
                       <span>•</span>
+
                       <span>
-                        {result.task?.problem_type || result.task?.task_type}
+                        {taskType.replace(
+                          "_",
+                          " "
+                        )}
                       </span>
                     </div>
                   </div>
 
                   <div className="result-actions">
                     <span className="complete-chip">
-                      <StatusDot online />
+                      <StatusDot
+                        online
+                      />
                       Completed
                     </span>
 
-                    <button className="ghost-button" onClick={copyReport}>
-                      {copied ? "Copied" : "Copy report"}
+                    <button
+                      className="ghost-button"
+                      onClick={copyReport}
+                    >
+                      {copied
+                        ? "Copied"
+                        : "Copy report"}
                     </button>
                   </div>
                 </div>
 
                 <div className="summary-strip">
                   <div>
-                    <span>Target</span>
-                    <strong>{result.task?.target_column || "—"}</strong>
-                  </div>
+                    <span>
+                      ANALYSIS TYPE
+                    </span>
 
-                  <div>
-                    <span>Best model</span>
-                    <strong>{result.model?.best_model || "—"}</strong>
-                  </div>
-
-                  <div>
-                    <span>AI model</span>
-                    <strong>{result.task?.model || "—"}</strong>
-                  </div>
-
-                  <div>
-                    <span>Source</span>
                     <strong>
-                      {result.final_answer_source || result.task?.source || "—"}
+                      {taskType.replace(
+                        "_",
+                        " "
+                      )}
+                    </strong>
+                  </div>
+
+                  <div>
+                    <span>
+                      TARGET
+                    </span>
+
+                    <strong>
+                      {result.task
+                        ?.target_column ||
+                        "Not required"}
+                    </strong>
+                  </div>
+
+                  <div>
+                    <span>
+                      ENGINE
+                    </span>
+
+                    <strong>
+                      {result.task
+                        ?.model ||
+                        result.unsupervised
+                          ?.method ||
+                        "DataMind"}
+                    </strong>
+                  </div>
+
+                  <div>
+                    <span>
+                      SOURCE
+                    </span>
+
+                    <strong>
+                      {result.task
+                        ?.source ||
+                        "—"}
                     </strong>
                   </div>
                 </div>
 
-                <div className="metric-grid">
-                  <MetricCard
-                    label="R² SCORE"
-                    value={formatNumber(result.evaluation?.r2, 4)}
-                    detail="Explained variance"
-                    accent="primary"
-                  />
+                {isSupervised && (
+                  <>
+                    <div className="metric-grid">
+                      <MetricCard
+                        label="R² SCORE"
+                        value={formatNumber(
+                          result.evaluation
+                            ?.r2,
+                          4
+                        )}
+                        detail="Explained variance"
+                        accent="primary"
+                      />
 
-                  <MetricCard
-                    label="MAE"
-                    value={formatNumber(result.evaluation?.mae, 2)}
-                    detail="Mean absolute error"
-                  />
+                      <MetricCard
+                        label="MAE"
+                        value={formatNumber(
+                          result.evaluation
+                            ?.mae,
+                          2
+                        )}
+                        detail="Mean absolute error"
+                      />
 
-                  <MetricCard
-                    label="RMSE"
-                    value={formatNumber(result.evaluation?.rmse, 2)}
-                    detail="Root mean squared error"
-                  />
+                      <MetricCard
+                        label="RMSE"
+                        value={formatNumber(
+                          result.evaluation
+                            ?.rmse,
+                          2
+                        )}
+                        detail="Root mean squared error"
+                      />
 
-                  <MetricCard
-                    label="SHAP"
-                    value={
-                      result.explainability?.shap_available
-                        ? "READY"
-                        : "N/A"
-                    }
-                    detail="Model explainability"
-                    accent={
-                      result.explainability?.shap_available
-                        ? "success"
-                        : "default"
-                    }
-                  />
-                </div>
-
-                <div className="insight-grid">
-                  <div className="insight-card">
-                    <div className="insight-card-header">
-                      <div>
-                        <div className="section-kicker">DATA HEALTH</div>
-                        <h4>Quality snapshot</h4>
-                      </div>
-
-                      <span
-                        className={
-                          result.data_quality?.has_quality_issues
-                            ? "warning-badge"
-                            : "success-badge"
+                      <MetricCard
+                        label="SHAP"
+                        value={
+                          result.explainability
+                            ?.shap_available
+                            ? "READY"
+                            : "N/A"
                         }
-                      >
-                        {result.data_quality?.has_quality_issues
-                          ? "Needs attention"
-                          : "Healthy"}
-                      </span>
-                    </div>
-
-                    <div className="snapshot-grid">
-                      <div>
-                        <strong>
-                          {formatNumber(
-                            result.data_quality?.missing_values,
-                            0
-                          )}
-                        </strong>
-                        <span>Missing values</span>
-                      </div>
-
-                      <div>
-                        <strong>
-                          {formatNumber(
-                            result.data_quality?.duplicate_rows,
-                            0
-                          )}
-                        </strong>
-                        <span>Duplicate rows</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="insight-card">
-                    <div className="insight-card-header">
-                      <div>
-                        <div className="section-kicker">LEAKAGE GUARD</div>
-                        <h4>Training protection</h4>
-                      </div>
-
-                      <span
-                        className={
-                          result.leakage?.detected
-                            ? "warning-badge"
-                            : "success-badge"
+                        detail="Model explainability"
+                        accent={
+                          result.explainability
+                            ?.shap_available
+                            ? "success"
+                            : "default"
                         }
-                      >
-                        {result.leakage?.detected ? "Handled" : "Clear"}
-                      </span>
+                      />
                     </div>
 
-                    <p className="insight-text">
-                      {result.leakage?.detected
-                        ? "DataMind detected potentially derived information and prevented it from contaminating model training."
-                        : "No confirmed target leakage was detected in the analyzed features."}
-                    </p>
+                    <div className="insight-grid">
+                      <div className="insight-card">
+                        <div className="insight-card-header">
+                          <div>
+                            <div className="section-kicker">
+                              DATA HEALTH
+                            </div>
 
-                    {result.leakage?.removed_columns?.length > 0 && (
-                      <div className="tag-row">
-                        {result.leakage.removed_columns.map((column) => (
-                          <span className="data-tag danger" key={column}>
-                            Removed: {column}
-                          </span>
-                        ))}
+                            <h4>
+                              Quality snapshot
+                            </h4>
+                          </div>
 
-                        {result.leakage.excluded_columns?.map((column) => (
-                          <span className="data-tag warning" key={column}>
-                            Excluded: {column}
+                          <span
+                            className={
+                              result.data_quality
+                                ?.has_quality_issues
+                                ? "warning-badge"
+                                : "success-badge"
+                            }
+                          >
+                            {result
+                              .data_quality
+                              ?.has_quality_issues
+                              ? "Needs attention"
+                              : "Healthy"}
                           </span>
-                        ))}
+                        </div>
+
+                        <div className="snapshot-grid">
+                          <div>
+                            <strong>
+                              {formatNumber(
+                                result
+                                  .data_quality
+                                  ?.missing_values,
+                                0
+                              )}
+                            </strong>
+
+                            <span>
+                              Missing values
+                            </span>
+                          </div>
+
+                          <div>
+                            <strong>
+                              {formatNumber(
+                                result
+                                  .data_quality
+                                  ?.duplicate_rows,
+                                0
+                              )}
+                            </strong>
+
+                            <span>
+                              Duplicate rows
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="insight-card">
+                        <div className="insight-card-header">
+                          <div>
+                            <div className="section-kicker">
+                              LEAKAGE GUARD
+                            </div>
+
+                            <h4>
+                              Training protection
+                            </h4>
+                          </div>
+
+                          <span
+                            className={
+                              result.leakage
+                                ?.detected
+                                ? "warning-badge"
+                                : "success-badge"
+                            }
+                          >
+                            {result.leakage
+                              ?.detected
+                              ? "Handled"
+                              : "Clear"}
+                          </span>
+                        </div>
+
+                        <p className="insight-text">
+                          {result.leakage
+                            ?.detected
+                            ? "DataMind detected potentially derived information and prevented it from contaminating model training."
+                            : "No confirmed target leakage was detected."}
+                        </p>
+
+                        {result.leakage
+                          ?.removed_columns
+                          ?.length >
+                          0 && (
+                          <div className="tag-row">
+                            {result.leakage.removed_columns.map(
+                              (
+                                column
+                              ) => (
+                                <span
+                                  className="data-tag danger"
+                                  key={
+                                    column
+                                  }
+                                >
+                                  Removed:{" "}
+                                  {
+                                    column
+                                  }
+                                </span>
+                              )
+                            )}
+
+                            {result.leakage
+                              .excluded_columns
+                              ?.map(
+                                (
+                                  column
+                                ) => (
+                                  <span
+                                    className="data-tag warning"
+                                    key={
+                                      column
+                                    }
+                                  >
+                                    Excluded:{" "}
+                                    {
+                                      column
+                                    }
+                                  </span>
+                                )
+                              )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {topFeatures.length >
+                      0 && (
+                      <div className="analysis-panel">
+                        <div className="panel-heading">
+                          <div>
+                            <div className="section-kicker">
+                              MODEL EXPLAINABILITY
+                            </div>
+
+                            <h4>
+                              What drives the prediction?
+                            </h4>
+                          </div>
+
+                          <span className="panel-pill">
+                            {
+                              topFeatures.length
+                            }{" "}
+                            features
+                          </span>
+                        </div>
+
+                        <div className="feature-list">
+                          {topFeatures
+                            .slice(
+                              0,
+                              8
+                            )
+                            .map(
+                              (
+                                item
+                              ) => (
+                                <FeatureBar
+                                  key={
+                                    item.feature
+                                  }
+                                  feature={
+                                    item.feature
+                                  }
+                                  importance={
+                                    item.importance
+                                  }
+                                  maxImportance={
+                                    maxFeatureImportance
+                                  }
+                                />
+                              )
+                            )}
+                        </div>
                       </div>
                     )}
-                  </div>
-                </div>
 
-                <div className="analysis-panel">
-                  <div className="panel-heading">
-                    <div>
-                      <div className="section-kicker">
-                        MODEL EXPLAINABILITY
+                    {shapFeatures.length >
+                      0 && (
+                      <div className="analysis-panel">
+                        <div className="panel-heading">
+                          <div>
+                            <div className="section-kicker">
+                              SHAP EXPLANATION
+                            </div>
+
+                            <h4>
+                              Global contribution strength
+                            </h4>
+                          </div>
+
+                          <span className="panel-pill">
+                            SHAP enabled
+                          </span>
+                        </div>
+
+                        <div className="feature-list">
+                          {shapFeatures
+                            .slice(
+                              0,
+                              6
+                            )
+                            .map(
+                              (
+                                item
+                              ) => (
+                                <FeatureBar
+                                  key={
+                                    item.feature
+                                  }
+                                  feature={
+                                    item.feature
+                                  }
+                                  importance={
+                                    item.importance
+                                  }
+                                  maxImportance={
+                                    maxShapImportance
+                                  }
+                                />
+                              )
+                            )}
+                        </div>
                       </div>
-                      <h4>What drives the prediction?</h4>
+                    )}
+                  </>
+                )}
+
+                {isClustering && (
+                  <>
+                    <div className="metric-grid">
+                      <MetricCard
+                        label="CLUSTERS"
+                        value={formatNumber(
+                          result.unsupervised
+                            ?.cluster_count,
+                          0
+                        )}
+                        detail="Groups identified"
+                        accent="primary"
+                      />
+
+                      <MetricCard
+                        label="SILHOUETTE"
+                        value={formatNumber(
+                          result.unsupervised
+                            ?.silhouette_score,
+                          4
+                        )}
+                        detail="Cluster separation"
+                      />
+
+                      <MetricCard
+                        label="QUALITY"
+                        value={
+                          result.unsupervised
+                            ?.cluster_quality ||
+                          "—"
+                        }
+                        detail="Separation assessment"
+                      />
+
+                      <MetricCard
+                        label="ROWS ANALYZED"
+                        value={formatNumber(
+                          result.unsupervised
+                            ?.rows_analyzed,
+                          0
+                        )}
+                        detail="Usable observations"
+                      />
                     </div>
 
-                    <span className="panel-pill">
-                      {topFeatures.length} features
-                    </span>
-                  </div>
+                    <div className="analysis-panel">
+                      <div className="panel-heading">
+                        <div>
+                          <div className="section-kicker">
+                            CLUSTERING
+                          </div>
 
-                  {topFeatures.length > 0 ? (
-                    <div className="feature-list">
-                      {topFeatures.slice(0, 8).map((item) => (
-                        <FeatureBar
-                          key={item.feature}
-                          feature={item.feature}
-                          importance={item.importance}
-                          maxImportance={maxFeatureImportance}
-                        />
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="no-data">Feature importance unavailable.</div>
-                  )}
-                </div>
+                          <h4>
+                            Cluster distribution
+                          </h4>
+                        </div>
 
-                {shapFeatures.length > 0 && (
-                  <div className="analysis-panel">
-                    <div className="panel-heading">
-                      <div>
-                        <div className="section-kicker">SHAP EXPLANATION</div>
-                        <h4>Global contribution strength</h4>
+                        <span className="panel-pill">
+                          KMeans
+                        </span>
                       </div>
 
-                      <span className="panel-pill">SHAP enabled</span>
+                      <div className="cluster-list">
+                        {clusterSizes.map(
+                          ([
+                            cluster,
+                            count,
+                          ]) => (
+                            <ClusterBar
+                              key={
+                                cluster
+                              }
+                              cluster={
+                                cluster
+                              }
+                              count={
+                                count
+                              }
+                              maxCount={
+                                maxClusterCount
+                              }
+                            />
+                          )
+                        )}
+                      </div>
                     </div>
 
-                    <div className="feature-list">
-                      {shapFeatures.slice(0, 6).map((item) => (
-                        <FeatureBar
-                          key={item.feature}
-                          feature={item.feature}
-                          importance={item.importance}
-                          maxImportance={maxShapImportance}
-                        />
-                      ))}
+                    {result.unsupervised
+                      ?.warning && (
+                      <div className="notice-card warning-notice">
+                        <strong>
+                          Interpretation note
+                        </strong>
+
+                        <p>
+                          {
+                            result
+                              .unsupervised
+                              .warning
+                          }
+                        </p>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {isAnomalyDetection && (
+                  <>
+                    <div className="metric-grid">
+                      <MetricCard
+                        label="ANOMALIES"
+                        value={formatNumber(
+                          result.unsupervised
+                            ?.anomaly_count,
+                          0
+                        )}
+                        detail="Potential unusual rows"
+                        accent="primary"
+                      />
+
+                      <MetricCard
+                        label="ANOMALY RATE"
+                        value={`${(
+                          Number(
+                            result.unsupervised
+                              ?.anomaly_rate ||
+                              0
+                          ) * 100
+                        ).toFixed(2)}%`}
+                        detail="Of analyzed rows"
+                      />
+
+                      <MetricCard
+                        label="NORMAL"
+                        value={formatNumber(
+                          result.unsupervised
+                            ?.normal_count,
+                          0
+                        )}
+                        detail="Rows within threshold"
+                      />
+
+                      <MetricCard
+                        label="METHOD"
+                        value="IF"
+                        detail="Isolation Forest"
+                      />
                     </div>
-                  </div>
+
+                    <div className="analysis-panel">
+                      <div className="panel-heading">
+                        <div>
+                          <div className="section-kicker">
+                            ANOMALY DETECTION
+                          </div>
+
+                          <h4>
+                            Highest anomaly scores
+                          </h4>
+                        </div>
+
+                        <span className="panel-pill">
+                          Top 10
+                        </span>
+                      </div>
+
+                      <div className="anomaly-table">
+                        <div className="anomaly-header">
+                          <span>
+                            Row index
+                          </span>
+
+                          <span>
+                            Score
+                          </span>
+
+                          <span>
+                            Status
+                          </span>
+                        </div>
+
+                        {topAnomalies.map(
+                          (item) => (
+                            <div
+                              className="anomaly-row"
+                              key={
+                                item.row_index
+                              }
+                            >
+                              <span>
+                                #
+                                {
+                                  item.row_index
+                                }
+                              </span>
+
+                              <strong>
+                                {Number(
+                                  item.anomaly_score
+                                ).toFixed(
+                                  6
+                                )}
+                              </strong>
+
+                              <span className="anomaly-badge">
+                                Potential anomaly
+                              </span>
+                            </div>
+                          )
+                        )}
+                      </div>
+                    </div>
+                  </>
                 )}
 
                 <div className="report-panel">
                   <div className="panel-heading">
                     <div>
-                      <div className="section-kicker">AI REPORT</div>
-                      <h4>DataMind findings</h4>
+                      <div className="section-kicker">
+                        AI REPORT
+                      </div>
+
+                      <h4>
+                        DataMind findings
+                      </h4>
                     </div>
 
                     <span className="panel-pill">
-                      {result.task?.source === "ollama"
-                        ? "Ollama"
-                        : "Deterministic"}
+                      {result.final_answer_source ||
+                        "DataMind"}
                     </span>
                   </div>
 
-                  <pre>{result.final_answer || "No report generated."}</pre>
+                  <pre>
+                    {result.final_answer ||
+                      "No report generated."}
+                  </pre>
                 </div>
               </div>
             )}
