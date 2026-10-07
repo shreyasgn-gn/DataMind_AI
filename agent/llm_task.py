@@ -43,11 +43,7 @@ def normalize_token(token: str) -> str:
     """
 
     token = normalize_text(token)
-
-    token = token.replace(
-        "_",
-        "",
-    )
+    token = token.replace("_", "")
 
     if token.endswith("ies"):
         token = token[:-3] + "y"
@@ -67,56 +63,99 @@ def normalize_token(token: str) -> str:
     return token
 
 
+def _column_tokens(
+    column: str,
+) -> list[str]:
+    """
+    Convert a column name into normalized semantic tokens.
+    """
+
+    normalized = normalize_text(
+        column
+    )
+
+    return [
+        normalize_token(token)
+        for token in re.split(
+            r"[\s_\-/]+",
+            normalized,
+        )
+        if len(token) > 2
+    ]
+
+
+def _target_match_score(
+    question: str,
+    column: str,
+) -> float:
+    """
+    Calculate how strongly the question matches a column.
+
+    A score of 1.0 means every meaningful column token
+    appears in the question.
+
+    Example:
+        "predict profit" + Profit
+            -> 1.0
+
+        "predict profit" + Profit_Margin
+            -> 0.5
+    """
+
+    question_tokens = {
+        normalize_token(token)
+        for token in normalize_text(
+            question
+        ).split()
+        if len(token) > 2
+    }
+
+    column_tokens = _column_tokens(
+        column
+    )
+
+    if not column_tokens:
+        return 0.0
+
+    matching_tokens = (
+        set(column_tokens)
+        & question_tokens
+    )
+
+    return (
+        len(matching_tokens)
+        / len(set(column_tokens))
+    )
+
+
 def resolve_target_column(
     question: str,
     columns: list[str],
 ) -> str | None:
     """
-    Resolve a likely target column from the user's question
-    using conservative token matching.
+    Resolve the strongest target using deterministic
+    semantic matching.
+
+    This is intentionally allowed to override an LLM target
+    when the user's wording clearly matches another column.
     """
-
-    question_normalized = normalize_text(
-        question
-    )
-
-    question_tokens = {
-        normalize_token(token)
-        for token in question_normalized.split()
-        if len(token) > 2
-    }
 
     candidates = []
 
     for column in columns:
 
-        column_normalized = normalize_text(
-            column
+        score = _target_match_score(
+            question,
+            column,
         )
 
-        column_tokens = [
-            normalize_token(token)
-            for token in re.split(
-                r"[\s_\-/]+",
-                column_normalized,
-            )
-            if len(token) > 2
-        ]
-
-        if not column_tokens:
-            continue
-
-        matching_tokens = (
-            set(column_tokens)
-            & question_tokens
-        )
-
-        if matching_tokens:
+        if score > 0:
 
             candidates.append({
                 "column": column,
-                "score": len(
-                    matching_tokens
+                "score": score,
+                "token_count": len(
+                    _column_tokens(column)
                 ),
             })
 
@@ -124,11 +163,20 @@ def resolve_target_column(
         return None
 
     candidates.sort(
-        key=lambda item: item["score"],
+        key=lambda item: (
+            item["score"],
+            -item["token_count"],
+        ),
         reverse=True,
     )
 
-    return candidates[0]["column"]
+    best = candidates[0]
+
+    # Strong enough match to safely use.
+    if best["score"] >= 1.0:
+        return best["column"]
+
+    return None
 
 
 def _extract_json(
@@ -154,6 +202,7 @@ def _extract_json(
     )
 
     try:
+
         return json.loads(
             cleaned
         )
@@ -182,11 +231,10 @@ def understand_task_with_llm(
     columns: list[str],
 ) -> dict:
     """
-    Use Ollama to identify the requested analytical task
-    and target column.
+    Use Ollama to identify the task.
 
-    The LLM interprets intent.
-    Python performs deterministic target validation.
+    Python deterministically validates and resolves targets
+    when the user's wording provides a strong exact match.
     """
 
     if not question or not question.strip():
@@ -207,7 +255,7 @@ def understand_task_with_llm(
     )
 
     prompt = f"""
-You are analyzing a user request for a data science system.
+You are analyzing a user request for a data-science system.
 
 DATASET COLUMNS:
 {column_text}
@@ -228,14 +276,13 @@ Rules:
 - regression means predicting a numeric value.
 - clustering means grouping similar records.
 - anomaly_detection means finding unusual records.
-- exploratory_analysis means analysis, trends, summaries, relationships, or insights.
-- Classification and regression may have a target.
-- Clustering MUST use target_column = null.
-- Anomaly detection MUST use target_column = null.
-- Exploratory analysis MUST use target_column = null.
+- exploratory_analysis means analysis, trends, summaries,
+  relationships, or insights.
+- Clustering MUST use null for target_column.
+- anomaly_detection MUST use null for target_column.
+- exploratory_analysis MUST use null for target_column.
 - Never invent a dataset column.
-- If the target is unclear for classification or regression, use null.
-- Copy dataset column names exactly when selecting a target.
+- Copy column names exactly.
 - Return JSON only.
 """
 
@@ -273,7 +320,7 @@ Rules:
         "task_type"
     )
 
-    target_column = result.get(
+    llm_target = result.get(
         "target_column"
     )
 
@@ -285,9 +332,7 @@ Rules:
         )
 
     # --------------------------------------------------
-    # Target-free tasks NEVER use a target.
-    # Python overrides any hallucinated target returned
-    # by the small LLM.
+    # Target-free tasks
     # --------------------------------------------------
 
     if task_type in {
@@ -296,54 +341,81 @@ Rules:
         "exploratory_analysis",
     }:
 
-        target_column = None
+        return {
+            "success": True,
+            "task_type": task_type,
+            "target_column": None,
+            "model": MODEL_NAME,
+            "source": "ollama",
+            "target_resolution": "not_required",
+            "llm_target": None,
+        }
 
-        target_resolution = "not_required"
+    # --------------------------------------------------
+    # Deterministic target resolution
+    # --------------------------------------------------
 
-    else:
+    deterministic_target = (
+        resolve_target_column(
+            question,
+            columns,
+        )
+    )
 
-        # --------------------------------------------------
-        # Resolve missing target deterministically
-        # --------------------------------------------------
+    if deterministic_target:
 
-        if target_column is None:
+        target_column = deterministic_target
 
-            target_column = resolve_target_column(
-                question,
-                columns,
-            )
+        if (
+            llm_target
+            and llm_target
+            != deterministic_target
+        ):
 
             target_resolution = (
-                "deterministic_fallback"
-                if target_column
-                else None
+                "deterministic_override"
             )
 
-        else:
+        elif llm_target:
 
             target_resolution = "llm"
 
-        # --------------------------------------------------
-        # Validate supervised-learning target
-        # --------------------------------------------------
+        else:
 
-        if target_column is not None:
+            target_resolution = (
+                "deterministic_fallback"
+            )
 
-            if target_column not in columns:
+    else:
 
-                raise ValueError(
-                    f"Ollama selected target "
-                    f"'{target_column}', but that column "
-                    "does not exist in the dataset."
-                )
+        target_column = llm_target
 
-        if target_column is None:
+        target_resolution = (
+            "llm"
+            if llm_target
+            else None
+        )
+
+    # --------------------------------------------------
+    # Validate target
+    # --------------------------------------------------
+
+    if target_column is not None:
+
+        if target_column not in columns:
 
             raise ValueError(
-                f"{task_type} requires a target column. "
-                "The LLM and deterministic target resolver "
-                "could not identify one."
+                f"Target '{target_column}' does not "
+                "exist in the dataset."
             )
+
+    if target_column is None:
+
+        raise ValueError(
+            f"{task_type} requires a target column. "
+            "The LLM and deterministic target resolver "
+            "could not identify one."
+        )
 
     return {
         "success": True,
@@ -352,4 +424,5 @@ Rules:
         "model": MODEL_NAME,
         "source": "ollama",
         "target_resolution": target_resolution,
+        "llm_target": llm_target,
     }

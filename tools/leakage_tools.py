@@ -4,7 +4,9 @@ import numpy as np
 import pandas as pd
 
 
-def normalize_column_name(column: str) -> str:
+def normalize_column_name(
+    column: str,
+) -> str:
     """
     Normalize a column name for relationship detection.
     """
@@ -16,36 +18,107 @@ def normalize_column_name(column: str) -> str:
     )
 
 
+def _safe_match_ratio(
+    actual: pd.Series,
+    calculated: pd.Series,
+    relative_tolerance: float = 1e-6,
+    absolute_tolerance: float = 0.01,
+) -> float:
+    """
+    Calculate how many valid rows match within a combined
+    absolute + relative tolerance.
+
+    This supports derived columns that were rounded before
+    being saved to CSV/XLSX.
+
+    Example:
+        Profit_Margin = round(Profit / Sales * 100, 2)
+    """
+
+    valid_mask = (
+        actual.notna()
+        & calculated.notna()
+        & np.isfinite(
+            calculated
+        )
+        & np.isfinite(
+            actual
+        )
+    )
+
+    if valid_mask.sum() == 0:
+        return 0.0
+
+    actual_values = actual[
+        valid_mask
+    ].to_numpy(
+        dtype=float
+    )
+
+    calculated_values = calculated[
+        valid_mask
+    ].to_numpy(
+        dtype=float
+    )
+
+    difference = np.abs(
+        actual_values
+        - calculated_values
+    )
+
+    scale = np.maximum(
+        np.abs(actual_values),
+        1.0,
+    )
+
+    allowed_error = np.maximum(
+        absolute_tolerance,
+        relative_tolerance * scale,
+    )
+
+    matches = (
+        difference
+        <= allowed_error
+    )
+
+    return float(
+        matches.mean()
+    )
+
+
 def detect_algebraic_leakage(
     df: pd.DataFrame,
     target_column: str,
-    tolerance: float = 1e-6,
+    relative_tolerance: float = 1e-6,
+    absolute_tolerance: float = 0.01,
 ) -> dict:
     """
     Detect simple arithmetic relationships between numeric
     features and the target.
 
-    Currently checks whether the target can be reproduced by:
+    Supported relationships:
+    - addition
+    - subtraction
+    - multiplication
+    - division
+    - percentage ratios
 
-        feature_a + feature_b
-        feature_a - feature_b
-        feature_a * feature_b
-        feature_a / feature_b
-
-    This is intentionally conservative and is meant to catch
-    obvious target leakage rather than discover every possible
-    mathematical relationship.
+    The detector allows small rounding differences common
+    in CSV/XLSX derived columns.
     """
 
     if target_column not in df.columns:
+
         raise ValueError(
             f"Target column '{target_column}' "
             "does not exist."
         )
 
-    numeric_columns = df.select_dtypes(
-        include="number"
-    ).columns.tolist()
+    numeric_columns = (
+        df.select_dtypes(
+            include="number"
+        ).columns.tolist()
+    )
 
     numeric_columns = [
         column
@@ -54,6 +127,7 @@ def detect_algebraic_leakage(
     ]
 
     if not numeric_columns:
+
         return {
             "target_column": target_column,
             "leakage_detected": False,
@@ -85,17 +159,23 @@ def detect_algebraic_leakage(
                 errors="coerce",
             )
 
-            comparisons = {
-                "addition": left + right,
+            calculations = {
+                "addition": (
+                    left + right
+                ),
+
                 "subtraction_left_right": (
                     left - right
                 ),
+
                 "subtraction_right_left": (
                     right - left
                 ),
+
                 "multiplication": (
                     left * right
                 ),
+
                 "division_left_right": (
                     left.div(
                         right.replace(
@@ -104,6 +184,7 @@ def detect_algebraic_leakage(
                         )
                     )
                 ),
+
                 "division_right_left": (
                     right.div(
                         left.replace(
@@ -112,47 +193,42 @@ def detect_algebraic_leakage(
                         )
                     )
                 ),
+
+                "percentage_left_right": (
+                    left.div(
+                        right.replace(
+                            0,
+                            np.nan,
+                        )
+                    ) * 100
+                ),
+
+                "percentage_right_left": (
+                    right.div(
+                        left.replace(
+                            0,
+                            np.nan,
+                        )
+                    ) * 100
+                ),
             }
 
-            for operation, calculated in (
-                comparisons.items()
-            ):
+            for (
+                operation,
+                calculated,
+            ) in calculations.items():
 
-                valid_mask = (
-                    target.notna()
-                    & calculated.notna()
-                )
-
-                if valid_mask.sum() == 0:
-                    continue
-
-                actual = target[
-                    valid_mask
-                ].to_numpy()
-
-                predicted = calculated[
-                    valid_mask
-                ].to_numpy()
-
-                difference = np.abs(
-                    actual - predicted
-                )
-
-                # Scale-aware tolerance
-                scale = np.maximum(
-                    np.abs(actual),
-                    1.0,
-                )
-
-                relative_error = (
-                    difference / scale
-                )
-
-                match_ratio = float(
-                    (
-                        relative_error
-                        <= tolerance
-                    ).mean()
+                match_ratio = (
+                    _safe_match_ratio(
+                        target,
+                        calculated,
+                        relative_tolerance=(
+                            relative_tolerance
+                        ),
+                        absolute_tolerance=(
+                            absolute_tolerance
+                        ),
+                    )
                 )
 
                 if match_ratio >= 0.99:
@@ -168,8 +244,8 @@ def detect_algebraic_leakage(
                             4,
                         ),
                         "description": (
-                            f"{target_column} appears to be "
-                            f"reproducible from "
+                            f"{target_column} appears "
+                            "to be reproducible from "
                             f"{left_column} and "
                             f"{right_column} using "
                             f"{operation}."
@@ -190,17 +266,14 @@ def detect_name_based_leakage(
     target_column: str,
 ) -> dict:
     """
-    Detect columns whose names strongly suggest they are
-    derived versions of the target.
-
-    Examples:
-        Profit -> Profit_Margin
-        Revenue -> Revenue_Percentage
-        Sales -> Sales_Ratio
+    Detect columns whose names strongly suggest they
+    are derived versions of the target.
     """
 
-    target_normalized = normalize_column_name(
-        target_column
+    target_normalized = (
+        normalize_column_name(
+            target_column
+        )
     )
 
     derived_terms = (
@@ -215,6 +288,8 @@ def detect_name_based_leakage(
         "derived",
         "calculated",
         "prediction",
+        "predicted",
+        "forecast",
     )
 
     suspicious_columns = []
@@ -229,7 +304,8 @@ def detect_name_based_leakage(
         )
 
         if (
-            target_normalized in normalized
+            target_normalized
+            in normalized
             and any(
                 term in normalized
                 for term in derived_terms
@@ -247,7 +323,9 @@ def detect_name_based_leakage(
 
     return {
         "target_column": target_column,
-        "suspicious_columns": suspicious_columns,
+        "suspicious_columns": (
+            suspicious_columns
+        ),
     }
 
 
@@ -257,34 +335,37 @@ def detect_target_leakage(
 ) -> dict:
     """
     Run conservative target-leakage checks.
-
-    The tool distinguishes between:
-    - confirmed mathematical leakage
-    - suspicious name-based leakage
-
-    It does not automatically delete any columns.
     """
 
-    algebraic = detect_algebraic_leakage(
-        df,
-        target_column,
+    algebraic = (
+        detect_algebraic_leakage(
+            df,
+            target_column,
+        )
     )
 
-    name_based = detect_name_based_leakage(
-        df,
-        target_column,
+    name_based = (
+        detect_name_based_leakage(
+            df,
+            target_column,
+        )
     )
 
     confirmed_columns = set()
 
-    for relationship in algebraic[
-        "relationships"
-    ]:
+    for relationship in (
+        algebraic[
+            "relationships"
+        ]
+    ):
 
         for column in relationship[
             "features"
         ]:
-            confirmed_columns.add(column)
+
+            confirmed_columns.add(
+                column
+            )
 
     suspicious_columns = [
         item["column"]
@@ -295,21 +376,36 @@ def detect_target_leakage(
 
     return {
         "target_column": target_column,
+
         "leakage_detected": (
-            algebraic["leakage_detected"]
-            or bool(suspicious_columns)
+            algebraic[
+                "leakage_detected"
+            ]
+            or bool(
+                suspicious_columns
+            )
         ),
-        "confirmed_leakage_columns": sorted(
-            confirmed_columns
+
+        "confirmed_leakage_columns": (
+            sorted(
+                confirmed_columns
+            )
         ),
+
         "suspicious_leakage_columns": (
             suspicious_columns
         ),
+
         "algebraic_relationships": (
-            algebraic["relationships"]
+            algebraic[
+                "relationships"
+            ]
         ),
+
         "name_based_findings": (
-            name_based["suspicious_columns"]
+            name_based[
+                "suspicious_columns"
+            ]
         ),
     }
 
@@ -319,15 +415,17 @@ def remove_leakage_features(
     leakage_report: dict,
 ) -> tuple[pd.DataFrame, list[str]]:
     """
-    Remove only confirmed leakage columns.
+    Remove confirmed mathematical leakage columns.
 
-    Suspicious name-based columns are retained because they
-    require additional evidence before automatic removal.
+    Suspicious name-based columns are not removed here.
+    The orchestrator decides how to handle them.
     """
 
-    columns_to_remove = leakage_report.get(
-        "confirmed_leakage_columns",
-        [],
+    columns_to_remove = (
+        leakage_report.get(
+            "confirmed_leakage_columns",
+            [],
+        )
     )
 
     columns_to_remove = [
