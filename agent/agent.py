@@ -4,28 +4,41 @@ from typing import Any, Callable
 import pandas as pd
 
 from agent.state import AgentState
+
 from agent.task_understanding import (
     understand_task,
     validate_target,
 )
+
 from agent.llm_task import (
     understand_task_with_llm,
 )
-from agent.recovery import execute_with_recovery
+
+from agent.reporting import (
+    generate_llm_report,
+)
+
+from agent.recovery import (
+    execute_with_recovery,
+)
 
 from tools.data_tools import (
     inspect_dataset,
     load_dataset,
 )
 
-from tools.profile_tools import profile_dataset
+from tools.profile_tools import (
+    profile_dataset,
+)
 
 from tools.cleaning_tools import (
     analyze_data_quality,
     clean_dataset,
 )
 
-from tools.eda_tools import perform_eda
+from tools.eda_tools import (
+    perform_eda,
+)
 
 from tools.feature_tools import (
     prepare_ml_features,
@@ -50,7 +63,9 @@ from tools.evaluation_tools import (
     summarize_evaluation,
 )
 
-from tools.shap_tools import explain_model
+from tools.shap_tools import (
+    explain_model,
+)
 
 
 class DataMindAgent:
@@ -58,22 +73,22 @@ class DataMindAgent:
     Autonomous data-science orchestration engine.
 
     Coordinates:
-    - dataset loading
     - LLM task understanding
-    - deterministic task fallback
-    - target-type validation
+    - deterministic validation
     - dataset inspection
     - profiling
     - data-quality analysis
     - cleaning
     - EDA
-    - target-leakage detection
     - feature engineering
+    - target-leakage detection
+    - leakage removal
     - model training
     - evaluation
     - feature importance
     - SHAP explainability
     - error recovery
+    - grounded final reporting
     """
 
     def __init__(self):
@@ -144,11 +159,8 @@ class DataMindAgent:
             )
 
             if errors:
-
                 last_error = errors[-1]["error"]
-
             else:
-
                 last_error = (
                     "Unknown execution failure."
                 )
@@ -166,11 +178,8 @@ class DataMindAgent:
         target_column: str,
     ) -> str:
         """
-        Determine whether a target is suitable for
+        Determine whether a target supports
         classification or regression.
-
-        This deterministic validation protects the system
-        when the local LLM misclassifies a numeric target.
         """
 
         if target_column not in self.state.dataset.columns:
@@ -204,8 +213,12 @@ class DataMindAgent:
             return "classification"
 
         if (
-            pd.api.types.is_object_dtype(target)
-            or pd.api.types.is_string_dtype(target)
+            pd.api.types.is_object_dtype(
+                target
+            )
+            or pd.api.types.is_string_dtype(
+                target
+            )
             or isinstance(
                 target.dtype,
                 pd.CategoricalDtype,
@@ -258,13 +271,7 @@ class DataMindAgent:
         llm_result: dict,
     ) -> dict:
         """
-        Validate the LLM task decision against the
-        actual dataset.
-
-        Target-free tasks remain unchanged.
-
-        For supervised tasks, the target datatype determines
-        whether classification or regression is valid.
+        Validate the LLM task against the actual dataset.
         """
 
         task_type = llm_result[
@@ -283,6 +290,12 @@ class DataMindAgent:
 
             return {
                 **llm_result,
+                "problem_type": (
+                    task_type
+                    if task_type
+                    != "exploratory_analysis"
+                    else None
+                ),
                 "validation": (
                     "Target-free task validated."
                 ),
@@ -313,45 +326,44 @@ class DataMindAgent:
 
         original_task_type = task_type
 
-        if task_type != validated_problem_type:
-
-            task_type = validated_problem_type
-
-        if task_type == "classification":
-
-            problem_type = "classification"
-
-        else:
-
-            problem_type = "regression"
+        corrected_task_type = (
+            validated_problem_type
+        )
 
         result = {
             **llm_result,
-            "task_type": task_type,
-            "problem_type": problem_type,
+            "task_type": corrected_task_type,
+            "problem_type": corrected_task_type,
             "target_column": target_column,
             "target_validation": validation,
         }
 
-        if original_task_type != task_type:
+        if (
+            original_task_type
+            != corrected_task_type
+        ):
 
             result["llm_task_correction"] = {
                 "original_task_type": (
                     original_task_type
                 ),
-                "corrected_task_type": task_type,
+                "corrected_task_type": (
+                    corrected_task_type
+                ),
                 "reason": (
                     f"The target column "
                     f"'{target_column}' has a data "
                     f"type and value distribution that "
-                    f"supports {task_type}, not "
-                    f"{original_task_type}."
+                    f"supports {corrected_task_type}, "
+                    f"not {original_task_type}."
                 ),
             }
 
         else:
 
-            result["llm_task_correction"] = None
+            result[
+                "llm_task_correction"
+            ] = None
 
         return result
 
@@ -373,10 +385,7 @@ class DataMindAgent:
         Understand the user's request using Ollama.
 
         If Ollama fails or returns an unusable result,
-        the deterministic task-understanding engine is used.
-
-        The LLM result is also validated against the actual
-        target datatype before the workflow continues.
+        use the deterministic task-understanding engine.
         """
 
         columns = (
@@ -408,66 +417,20 @@ class DataMindAgent:
                 "problem_type"
             )
 
-            if problem_type is None:
-
-                if task_type == "classification":
-
-                    problem_type = (
-                        "classification"
-                    )
-
-                elif task_type == "regression":
-
-                    problem_type = (
-                        "regression"
-                    )
-
-                elif task_type == "clustering":
-
-                    problem_type = (
-                        "clustering"
-                    )
-
-                elif task_type == "anomaly_detection":
-
-                    problem_type = (
-                        "anomaly_detection"
-                    )
-
-            result["problem_type"] = (
-                problem_type
-            )
-
-            result["source"] = "ollama"
-            result["model"] = (
-                llm_result["model"]
-            )
-            result["confidence"] = "high"
-
-            if result.get(
-                "llm_task_correction"
-            ):
-
-                result["reason"] = (
-                    "Ollama interpreted the request, "
-                    "then Python corrected the task type "
-                    "using the actual target datatype."
-                )
-
-                self._record_step(
-                    "llm_task_validation"
-                )
-
-            else:
-
-                result["reason"] = (
+            self.state.task_understanding = {
+                **result,
+                "success": True,
+                "source": "ollama",
+                "model": (
+                    llm_result["model"]
+                ),
+                "confidence": "high",
+                "reason": (
                     "User request interpreted by "
-                    "the local Ollama model."
-                )
-
-            self.state.task_understanding = (
-                result
-            )
+                    "the local Ollama model and "
+                    "validated against the dataset."
+                ),
+            }
 
             self.state.task_type = (
                 task_type
@@ -495,9 +458,9 @@ class DataMindAgent:
 
             llm_error = str(error)
 
-        # -------------------------------------------------
+        # ---------------------------------------------
         # Deterministic fallback
-        # -------------------------------------------------
+        # ---------------------------------------------
 
         fallback_result = understand_task(
             self.state.question,
@@ -514,13 +477,13 @@ class DataMindAgent:
                 f"{fallback_result['reason']}"
             )
 
-        fallback_result["source"] = (
-            "deterministic_fallback"
-        )
+        fallback_result[
+            "source"
+        ] = "deterministic_fallback"
 
-        fallback_result["llm_error"] = (
-            llm_error
-        )
+        fallback_result[
+            "llm_error"
+        ] = llm_error
 
         self.state.task_understanding = (
             fallback_result
@@ -530,25 +493,37 @@ class DataMindAgent:
             fallback_result["task_type"]
         )
 
-        if self.state.task_type == "classification":
+        if (
+            self.state.task_type
+            == "classification"
+        ):
 
             self.state.problem_type = (
                 "classification"
             )
 
-        elif self.state.task_type == "regression":
+        elif (
+            self.state.task_type
+            == "regression"
+        ):
 
             self.state.problem_type = (
                 "regression"
             )
 
-        elif self.state.task_type == "clustering":
+        elif (
+            self.state.task_type
+            == "clustering"
+        ):
 
             self.state.problem_type = (
                 "clustering"
             )
 
-        elif self.state.task_type == "anomaly_detection":
+        elif (
+            self.state.task_type
+            == "anomaly_detection"
+        ):
 
             self.state.problem_type = (
                 "anomaly_detection"
@@ -645,16 +620,15 @@ class DataMindAgent:
         """
         Execute the complete supervised ML workflow.
 
-        Steps:
-        1. Target leakage detection.
-        2. Confirmed leakage removal.
-        3. Suspicious derived-feature exclusion.
-        4. Feature engineering.
-        5. Model training with recovery.
-        6. Model evaluation.
-        7. Feature importance.
-        8. Predictions.
-        9. SHAP explainability.
+        IMPORTANT ORDER:
+        1. Feature engineering on the original dataset.
+        2. Target-leakage detection on the original dataset.
+        3. Remove confirmed leakage features.
+        4. Remove suspicious derived features.
+        5. Train and evaluate models.
+
+        This prevents removed columns such as Sales from
+        being accidentally recreated as calculated_sales.
         """
 
         if self.state.problem_type not in {
@@ -672,9 +646,27 @@ class DataMindAgent:
 
         target = self.state.target_column
 
-        # -------------------------------------------------
-        # Target leakage detection
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # FEATURE ENGINEERING FIRST
+        # ---------------------------------------------
+
+        (
+            engineered_data,
+            self.state.feature_report,
+        ) = prepare_ml_features(
+            self.state.dataset
+        )
+
+        if target not in engineered_data.columns:
+
+            raise ValueError(
+                f"Target column '{target}' was not "
+                "available after feature preparation."
+            )
+
+        # ---------------------------------------------
+        # TARGET LEAKAGE DETECTION
+        # ---------------------------------------------
 
         leakage_report = (
             detect_target_leakage(
@@ -691,15 +683,15 @@ class DataMindAgent:
             "target_leakage_detection"
         )
 
-        # -------------------------------------------------
-        # Remove confirmed leakage
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # REMOVE CONFIRMED LEAKAGE FEATURES
+        # ---------------------------------------------
 
         (
-            ml_source_data,
+            ml_data,
             removed_columns,
         ) = remove_leakage_features(
-            self.state.dataset,
+            engineered_data,
             leakage_report,
         )
 
@@ -707,27 +699,9 @@ class DataMindAgent:
             "removed_columns"
         ] = removed_columns
 
-        # -------------------------------------------------
-        # Feature engineering
-        # -------------------------------------------------
-
-        (
-            ml_data,
-            self.state.feature_report,
-        ) = prepare_ml_features(
-            ml_source_data
-        )
-
-        if target not in ml_data.columns:
-
-            raise ValueError(
-                f"Target column '{target}' was not "
-                "available after feature preparation."
-            )
-
-        # -------------------------------------------------
-        # Remove suspicious derived target features
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # REMOVE SUSPICIOUS DERIVED FEATURES
+        # ---------------------------------------------
 
         suspicious_columns = (
             leakage_report.get(
@@ -766,9 +740,9 @@ class DataMindAgent:
             "feature_engineering"
         )
 
-        # -------------------------------------------------
-        # Model training with recovery
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # MODEL TRAINING WITH RECOVERY
+        # ---------------------------------------------
 
         self.state.training_result = (
             self._run_with_recovery(
@@ -804,9 +778,9 @@ class DataMindAgent:
                 "No valid model was successfully trained."
             )
 
-        # -------------------------------------------------
-        # Prepare evaluation data
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # PREPARE EVALUATION DATA
+        # ---------------------------------------------
 
         (
             X,
@@ -832,9 +806,9 @@ class DataMindAgent:
             classification=is_classification,
         )
 
-        # -------------------------------------------------
-        # Evaluation
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # MODEL EVALUATION
+        # ---------------------------------------------
 
         if is_classification:
 
@@ -860,9 +834,9 @@ class DataMindAgent:
             "model_evaluation"
         )
 
-        # -------------------------------------------------
-        # Feature importance
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # FEATURE IMPORTANCE
+        # ---------------------------------------------
 
         importance = get_feature_importance(
             best_model,
@@ -878,9 +852,9 @@ class DataMindAgent:
             "feature_importance"
         )
 
-        # -------------------------------------------------
-        # Predictions
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # PREDICTIONS
+        # ---------------------------------------------
 
         predictions = generate_predictions(
             best_model,
@@ -898,9 +872,9 @@ class DataMindAgent:
             )
         )
 
-        # -------------------------------------------------
+        # ---------------------------------------------
         # SHAP
-        # -------------------------------------------------
+        # ---------------------------------------------
 
         shap_result = explain_model(
             best_model,
@@ -915,9 +889,9 @@ class DataMindAgent:
             "shap_explainability"
         )
 
-        # -------------------------------------------------
-        # Evaluation summary
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # SUMMARY
+        # ---------------------------------------------
 
         self.state.explainability_result[
             "summary"
@@ -927,9 +901,11 @@ class DataMindAgent:
             importance,
         )
 
-    def generate_final_answer(self) -> str:
+    def generate_deterministic_answer(
+        self,
+    ) -> str:
         """
-        Generate a concise user-facing summary.
+        Generate a deterministic fallback answer.
         """
 
         if (
@@ -947,13 +923,13 @@ class DataMindAgent:
                 0,
             )
 
-            self.state.final_answer = (
+            return (
                 "Dataset analysis completed successfully. "
                 f"The dataset contains {rows} rows and "
                 f"{columns} columns."
             )
 
-        elif self.state.problem_type in {
+        if self.state.problem_type in {
             "classification",
             "regression",
         }:
@@ -965,73 +941,141 @@ class DataMindAgent:
                 )
             )
 
-            retry_count = sum(
-                max(
-                    item.get(
-                        "attempts",
-                        1,
-                    ) - 1,
-                    0,
-                )
-                for item in (
-                    self.state.recovery_history
-                )
-            )
-
-            correction = (
-                self.state.task_understanding.get(
-                    "llm_task_correction"
-                )
-            )
-
-            self.state.final_answer = (
+            return (
                 f"{self.state.problem_type.title()} "
                 "workflow completed successfully. "
                 f"Best model: {model_name}."
             )
 
-            if correction:
-
-                self.state.final_answer += (
-                    " The initial LLM task interpretation "
-                    "was validated and corrected using "
-                    "the target data type."
-                )
-
-            if retry_count:
-
-                self.state.final_answer += (
-                    f" Recovery succeeded after "
-                    f"{retry_count} retry attempt(s)."
-                )
-
-        elif (
+        if (
             self.state.task_type
             == "clustering"
         ):
 
-            self.state.final_answer = (
+            return (
                 "Clustering was identified as the requested "
                 "task, but the clustering engine has not "
                 "been implemented yet."
             )
 
-        elif (
+        if (
             self.state.task_type
             == "anomaly_detection"
         ):
 
-            self.state.final_answer = (
+            return (
                 "Anomaly detection was identified as the "
                 "requested task, but the anomaly detection "
                 "engine has not been implemented yet."
             )
 
-        else:
+        return (
+            "The requested analysis completed."
+        )
+
+    def generate_final_answer(
+        self,
+    ) -> str:
+        """
+        Generate the final user-facing answer.
+
+        EDA uses deterministic verified reporting.
+
+        Supervised ML uses Ollama for wording with a
+        deterministic fallback.
+        """
+
+        # ---------------------------------------------
+        # EDA reporting
+        # ---------------------------------------------
+
+        if (
+            self.state.task_type
+            == "exploratory_analysis"
+        ):
 
             self.state.final_answer = (
-                "The requested analysis completed."
+                generate_llm_report(
+                    self.state
+                )
             )
+
+            self.state.final_answer_source = (
+                "deterministic_eda"
+            )
+
+            self._record_step(
+                "verified_report_generation"
+            )
+
+            return self.state.final_answer
+
+        # ---------------------------------------------
+        # ML reporting
+        # ---------------------------------------------
+
+        if self.state.problem_type in {
+            "classification",
+            "regression",
+        }:
+
+            try:
+
+                answer = generate_llm_report(
+                    self.state
+                )
+
+                if not answer:
+
+                    raise ValueError(
+                        "Ollama returned an empty report."
+                    )
+
+                self.state.final_answer = (
+                    answer
+                )
+
+                self.state.final_answer_source = (
+                    "ollama"
+                )
+
+                self._record_step(
+                    "llm_report_generation"
+                )
+
+                return answer
+
+            except Exception as error:
+
+                self.state.task_understanding[
+                    "report_llm_error"
+                ] = str(error)
+
+                self.state.final_answer = (
+                    self.generate_deterministic_answer()
+                )
+
+                self.state.final_answer_source = (
+                    "deterministic_fallback"
+                )
+
+                self._record_step(
+                    "deterministic_report_fallback"
+                )
+
+                return self.state.final_answer
+
+        # ---------------------------------------------
+        # Non-ML tasks
+        # ---------------------------------------------
+
+        self.state.final_answer = (
+            self.generate_deterministic_answer()
+        )
+
+        self.state.final_answer_source = (
+            "deterministic"
+        )
 
         return self.state.final_answer
 

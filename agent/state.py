@@ -76,3 +76,5 @@ class AgentState:
     status: str = "initialized"
 
     final_answer: str = ""
+
+    final_answer_source: str = "deterministic"
