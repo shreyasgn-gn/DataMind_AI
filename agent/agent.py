@@ -1,8 +1,16 @@
 from pathlib import Path
 from typing import Any, Callable
 
+import pandas as pd
+
 from agent.state import AgentState
-from agent.task_understanding import understand_task
+from agent.task_understanding import (
+    understand_task,
+    validate_target,
+)
+from agent.llm_task import (
+    understand_task_with_llm,
+)
 from agent.recovery import execute_with_recovery
 
 from tools.data_tools import (
@@ -19,7 +27,9 @@ from tools.cleaning_tools import (
 
 from tools.eda_tools import perform_eda
 
-from tools.feature_tools import prepare_ml_features
+from tools.feature_tools import (
+    prepare_ml_features,
+)
 
 from tools.leakage_tools import (
     detect_target_leakage,
@@ -45,14 +55,25 @@ from tools.shap_tools import explain_model
 
 class DataMindAgent:
     """
-    Deterministic orchestration engine for DataMind AI.
+    Autonomous data-science orchestration engine.
 
-    Coordinates dataset understanding, data quality,
-    EDA, leakage detection, feature engineering, model
-    training, evaluation, and explainability.
-
-    Failed model-training operations can be retried
-    through the recovery engine.
+    Coordinates:
+    - dataset loading
+    - LLM task understanding
+    - deterministic task fallback
+    - target-type validation
+    - dataset inspection
+    - profiling
+    - data-quality analysis
+    - cleaning
+    - EDA
+    - target-leakage detection
+    - feature engineering
+    - model training
+    - evaluation
+    - feature importance
+    - SHAP explainability
+    - error recovery
     """
 
     def __init__(self):
@@ -93,10 +114,6 @@ class DataMindAgent:
     ) -> Any:
         """
         Execute an operation through the recovery engine.
-
-        A failed operation is retried according to the
-        recovery policy. Failed attempts and recovery
-        actions are recorded in the shared agent state.
         """
 
         result = execute_with_recovery(
@@ -104,12 +121,11 @@ class DataMindAgent:
             max_retries=max_retries,
         )
 
-        # Keep a history when a retry was needed
-        # or the operation ultimately failed.
         if (
             result["attempts"] > 1
             or not result["success"]
         ):
+
             self.state.recovery_history.append({
                 "operation": operation_name,
                 "success": result["success"],
@@ -128,8 +144,11 @@ class DataMindAgent:
             )
 
             if errors:
+
                 last_error = errors[-1]["error"]
+
             else:
+
                 last_error = (
                     "Unknown execution failure."
                 )
@@ -141,6 +160,200 @@ class DataMindAgent:
             )
 
         return result["result"]
+
+    def _infer_problem_type_from_target(
+        self,
+        target_column: str,
+    ) -> str:
+        """
+        Determine whether a target is suitable for
+        classification or regression.
+
+        This deterministic validation protects the system
+        when the local LLM misclassifies a numeric target.
+        """
+
+        if target_column not in self.state.dataset.columns:
+
+            raise ValueError(
+                f"Target column '{target_column}' "
+                "does not exist."
+            )
+
+        target = self.state.dataset[
+            target_column
+        ]
+
+        unique_count = int(
+            target.nunique(
+                dropna=True
+            )
+        )
+
+        if unique_count <= 1:
+
+            raise ValueError(
+                f"Target column '{target_column}' "
+                "contains one or fewer unique values."
+            )
+
+        if pd.api.types.is_bool_dtype(
+            target
+        ):
+
+            return "classification"
+
+        if (
+            pd.api.types.is_object_dtype(target)
+            or pd.api.types.is_string_dtype(target)
+            or isinstance(
+                target.dtype,
+                pd.CategoricalDtype,
+            )
+        ):
+
+            if unique_count <= 20:
+
+                return "classification"
+
+            raise ValueError(
+                f"Target column '{target_column}' "
+                "has too many categorical values for "
+                "automatic classification."
+            )
+
+        if pd.api.types.is_numeric_dtype(
+            target
+        ):
+
+            unique_ratio = (
+                unique_count / len(target)
+                if len(target) > 0
+                else 0
+            )
+
+            if unique_count == 2:
+
+                return "classification"
+
+            if (
+                unique_count <= 10
+                and unique_ratio <= 0.10
+                and pd.api.types.is_integer_dtype(
+                    target
+                )
+            ):
+
+                return "classification"
+
+            return "regression"
+
+        raise ValueError(
+            f"Target column '{target_column}' "
+            "has an unsupported data type."
+        )
+
+    def _validate_llm_decision(
+        self,
+        llm_result: dict,
+    ) -> dict:
+        """
+        Validate the LLM task decision against the
+        actual dataset.
+
+        Target-free tasks remain unchanged.
+
+        For supervised tasks, the target datatype determines
+        whether classification or regression is valid.
+        """
+
+        task_type = llm_result[
+            "task_type"
+        ]
+
+        target_column = llm_result[
+            "target_column"
+        ]
+
+        if task_type in {
+            "clustering",
+            "anomaly_detection",
+            "exploratory_analysis",
+        }:
+
+            return {
+                **llm_result,
+                "validation": (
+                    "Target-free task validated."
+                ),
+            }
+
+        if target_column is None:
+
+            raise ValueError(
+                f"{task_type} requires a target column."
+            )
+
+        validation = validate_target(
+            self.state.dataset,
+            target_column,
+        )
+
+        if not validation["valid"]:
+
+            raise ValueError(
+                validation["reason"]
+            )
+
+        validated_problem_type = (
+            self._infer_problem_type_from_target(
+                target_column
+            )
+        )
+
+        original_task_type = task_type
+
+        if task_type != validated_problem_type:
+
+            task_type = validated_problem_type
+
+        if task_type == "classification":
+
+            problem_type = "classification"
+
+        else:
+
+            problem_type = "regression"
+
+        result = {
+            **llm_result,
+            "task_type": task_type,
+            "problem_type": problem_type,
+            "target_column": target_column,
+            "target_validation": validation,
+        }
+
+        if original_task_type != task_type:
+
+            result["llm_task_correction"] = {
+                "original_task_type": (
+                    original_task_type
+                ),
+                "corrected_task_type": task_type,
+                "reason": (
+                    f"The target column "
+                    f"'{target_column}' has a data "
+                    f"type and value distribution that "
+                    f"supports {task_type}, not "
+                    f"{original_task_type}."
+                ),
+            }
+
+        else:
+
+            result["llm_task_correction"] = None
+
+        return result
 
     def load_data(self) -> None:
         """
@@ -157,35 +370,206 @@ class DataMindAgent:
 
     def understand_request(self) -> None:
         """
-        Understand the user's analytical request.
+        Understand the user's request using Ollama.
+
+        If Ollama fails or returns an unusable result,
+        the deterministic task-understanding engine is used.
+
+        The LLM result is also validated against the actual
+        target datatype before the workflow continues.
         """
 
-        result = understand_task(
+        columns = (
+            self.state.dataset.columns.tolist()
+        )
+
+        llm_error = None
+
+        try:
+
+            llm_result = (
+                understand_task_with_llm(
+                    self.state.question,
+                    columns,
+                )
+            )
+
+            result = (
+                self._validate_llm_decision(
+                    llm_result
+                )
+            )
+
+            task_type = result[
+                "task_type"
+            ]
+
+            problem_type = result.get(
+                "problem_type"
+            )
+
+            if problem_type is None:
+
+                if task_type == "classification":
+
+                    problem_type = (
+                        "classification"
+                    )
+
+                elif task_type == "regression":
+
+                    problem_type = (
+                        "regression"
+                    )
+
+                elif task_type == "clustering":
+
+                    problem_type = (
+                        "clustering"
+                    )
+
+                elif task_type == "anomaly_detection":
+
+                    problem_type = (
+                        "anomaly_detection"
+                    )
+
+            result["problem_type"] = (
+                problem_type
+            )
+
+            result["source"] = "ollama"
+            result["model"] = (
+                llm_result["model"]
+            )
+            result["confidence"] = "high"
+
+            if result.get(
+                "llm_task_correction"
+            ):
+
+                result["reason"] = (
+                    "Ollama interpreted the request, "
+                    "then Python corrected the task type "
+                    "using the actual target datatype."
+                )
+
+                self._record_step(
+                    "llm_task_validation"
+                )
+
+            else:
+
+                result["reason"] = (
+                    "User request interpreted by "
+                    "the local Ollama model."
+                )
+
+            self.state.task_understanding = (
+                result
+            )
+
+            self.state.task_type = (
+                task_type
+            )
+
+            self.state.problem_type = (
+                problem_type
+            )
+
+            self.state.target_column = (
+                result["target_column"]
+            )
+
+            self._record_step(
+                "understand_task"
+            )
+
+            self._record_step(
+                "llm_task_understanding"
+            )
+
+            return
+
+        except Exception as error:
+
+            llm_error = str(error)
+
+        # -------------------------------------------------
+        # Deterministic fallback
+        # -------------------------------------------------
+
+        fallback_result = understand_task(
             self.state.question,
             self.state.dataset,
         )
 
-        self.state.task_understanding = result
+        if not fallback_result["success"]:
 
-        if not result["success"]:
             raise ValueError(
-                result["reason"]
+                "LLM task understanding failed and "
+                "deterministic fallback also failed. "
+                f"LLM error: {llm_error}. "
+                f"Fallback error: "
+                f"{fallback_result['reason']}"
             )
 
-        self.state.task_type = (
-            result["task_type"]
+        fallback_result["source"] = (
+            "deterministic_fallback"
         )
 
-        self.state.problem_type = (
-            result["problem_type"]
+        fallback_result["llm_error"] = (
+            llm_error
         )
+
+        self.state.task_understanding = (
+            fallback_result
+        )
+
+        self.state.task_type = (
+            fallback_result["task_type"]
+        )
+
+        if self.state.task_type == "classification":
+
+            self.state.problem_type = (
+                "classification"
+            )
+
+        elif self.state.task_type == "regression":
+
+            self.state.problem_type = (
+                "regression"
+            )
+
+        elif self.state.task_type == "clustering":
+
+            self.state.problem_type = (
+                "clustering"
+            )
+
+        elif self.state.task_type == "anomaly_detection":
+
+            self.state.problem_type = (
+                "anomaly_detection"
+            )
+
+        else:
+
+            self.state.problem_type = None
 
         self.state.target_column = (
-            result["target_column"]
+            fallback_result[
+                "target_column"
+            ]
         )
 
         self._record_step(
             "understand_task"
+        )
+
+        self._record_step(
+            "deterministic_task_fallback"
         )
 
     def inspect_and_profile(self) -> None:
@@ -215,10 +599,7 @@ class DataMindAgent:
 
     def check_data_quality(self) -> None:
         """
-        Analyze dataset quality.
-
-        Clean the working dataset when quality issues
-        are detected.
+        Analyze data quality and clean when needed.
         """
 
         self.state.data_quality = (
@@ -265,36 +646,41 @@ class DataMindAgent:
         Execute the complete supervised ML workflow.
 
         Steps:
-        1. Detect target leakage.
-        2. Remove confirmed leakage features.
-        3. Exclude suspicious target-derived features.
-        4. Engineer features.
-        5. Train models with retry support.
-        6. Evaluate the selected model.
-        7. Generate feature importance and predictions.
-        8. Explain model behavior with SHAP.
+        1. Target leakage detection.
+        2. Confirmed leakage removal.
+        3. Suspicious derived-feature exclusion.
+        4. Feature engineering.
+        5. Model training with recovery.
+        6. Model evaluation.
+        7. Feature importance.
+        8. Predictions.
+        9. SHAP explainability.
         """
 
         if self.state.problem_type not in {
             "classification",
             "regression",
         }:
+
             return
 
         if not self.state.target_column:
+
             raise ValueError(
                 "A target column is required for ML."
             )
 
         target = self.state.target_column
 
-        # ---------------------------------------------
-        # 1. TARGET LEAKAGE DETECTION
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # Target leakage detection
+        # -------------------------------------------------
 
-        leakage_report = detect_target_leakage(
-            self.state.dataset,
-            target,
+        leakage_report = (
+            detect_target_leakage(
+                self.state.dataset,
+                target,
+            )
         )
 
         self.state.leakage_report = (
@@ -305,9 +691,9 @@ class DataMindAgent:
             "target_leakage_detection"
         )
 
-        # ---------------------------------------------
-        # 2. REMOVE CONFIRMED LEAKAGE FEATURES
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # Remove confirmed leakage
+        # -------------------------------------------------
 
         (
             ml_source_data,
@@ -321,9 +707,9 @@ class DataMindAgent:
             "removed_columns"
         ] = removed_columns
 
-        # ---------------------------------------------
-        # 3. FEATURE ENGINEERING
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # Feature engineering
+        # -------------------------------------------------
 
         (
             ml_data,
@@ -333,13 +719,16 @@ class DataMindAgent:
         )
 
         if target not in ml_data.columns:
+
             raise ValueError(
                 f"Target column '{target}' was not "
                 "available after feature preparation."
             )
 
-        # Exclude columns whose names suggest that
-        # they are derived from the target.
+        # -------------------------------------------------
+        # Remove suspicious derived target features
+        # -------------------------------------------------
+
         suspicious_columns = (
             leakage_report.get(
                 "suspicious_leakage_columns",
@@ -357,6 +746,7 @@ class DataMindAgent:
         ]
 
         if suspicious_columns:
+
             ml_data = ml_data.drop(
                 columns=suspicious_columns
             )
@@ -366,6 +756,7 @@ class DataMindAgent:
         ] = suspicious_columns
 
         if ml_data.empty:
+
             raise ValueError(
                 "No usable columns remain after "
                 "leakage removal and feature engineering."
@@ -375,9 +766,9 @@ class DataMindAgent:
             "feature_engineering"
         )
 
-        # ---------------------------------------------
-        # 4. MODEL TRAINING WITH RECOVERY
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # Model training with recovery
+        # -------------------------------------------------
 
         self.state.training_result = (
             self._run_with_recovery(
@@ -408,13 +799,14 @@ class DataMindAgent:
         )
 
         if best_model is None:
+
             raise ValueError(
                 "No valid model was successfully trained."
             )
 
-        # ---------------------------------------------
-        # 5. PREPARE EVALUATION DATA
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # Prepare evaluation data
+        # -------------------------------------------------
 
         (
             X,
@@ -440,9 +832,9 @@ class DataMindAgent:
             classification=is_classification,
         )
 
-        # ---------------------------------------------
-        # 6. MODEL EVALUATION
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # Evaluation
+        # -------------------------------------------------
 
         if is_classification:
 
@@ -468,9 +860,9 @@ class DataMindAgent:
             "model_evaluation"
         )
 
-        # ---------------------------------------------
-        # 7. FEATURE IMPORTANCE
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # Feature importance
+        # -------------------------------------------------
 
         importance = get_feature_importance(
             best_model,
@@ -486,9 +878,9 @@ class DataMindAgent:
             "feature_importance"
         )
 
-        # ---------------------------------------------
-        # 8. PREDICTIONS
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # Predictions
+        # -------------------------------------------------
 
         predictions = generate_predictions(
             best_model,
@@ -506,9 +898,9 @@ class DataMindAgent:
             )
         )
 
-        # ---------------------------------------------
-        # 9. SHAP EXPLAINABILITY
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # SHAP
+        # -------------------------------------------------
 
         shap_result = explain_model(
             best_model,
@@ -523,9 +915,9 @@ class DataMindAgent:
             "shap_explainability"
         )
 
-        # ---------------------------------------------
-        # 10. EVALUATION SUMMARY
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # Evaluation summary
+        # -------------------------------------------------
 
         self.state.explainability_result[
             "summary"
@@ -575,27 +967,48 @@ class DataMindAgent:
 
             retry_count = sum(
                 max(
-                    entry.get("attempts", 1) - 1,
+                    item.get(
+                        "attempts",
+                        1,
+                    ) - 1,
                     0,
                 )
-                for entry in self.state.recovery_history
+                for item in (
+                    self.state.recovery_history
+                )
             )
 
-            answer = (
+            correction = (
+                self.state.task_understanding.get(
+                    "llm_task_correction"
+                )
+            )
+
+            self.state.final_answer = (
                 f"{self.state.problem_type.title()} "
                 "workflow completed successfully. "
                 f"Best model: {model_name}."
             )
 
+            if correction:
+
+                self.state.final_answer += (
+                    " The initial LLM task interpretation "
+                    "was validated and corrected using "
+                    "the target data type."
+                )
+
             if retry_count:
-                answer += (
+
+                self.state.final_answer += (
                     f" Recovery succeeded after "
                     f"{retry_count} retry attempt(s)."
                 )
 
-            self.state.final_answer = answer
-
-        elif self.state.task_type == "clustering":
+        elif (
+            self.state.task_type
+            == "clustering"
+        ):
 
             self.state.final_answer = (
                 "Clustering was identified as the requested "
@@ -640,6 +1053,7 @@ class DataMindAgent:
         try:
 
             if not Path(file_path).exists():
+
                 raise FileNotFoundError(
                     f"Dataset not found: {file_path}"
                 )
